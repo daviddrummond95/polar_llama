@@ -11,8 +11,6 @@ import matplotlib.pyplot as plt
 os.environ['POLARS_VERBOSE'] = '1'
 
 
-
-
 def time_function(func, dataframe, column_name, print_output=False):
     """Measure the time taken by a function to execute."""
     start = time()
