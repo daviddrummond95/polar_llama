@@ -55,12 +55,14 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
 
       - name: Set environment variables
         run: |
           echo "OPENSSL_DIR=/usr/lib/ssl" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
