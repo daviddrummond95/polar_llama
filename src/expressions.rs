@@ -3,7 +3,8 @@ use crate::utils::*;
 use once_cell::sync::Lazy;
 use polars::prelude::*;
 use pyo3_polars::derive::polars_expr;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+// use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 use tokio::runtime::Runtime;
 
@@ -38,13 +39,13 @@ fn inference_async(inputs: &[Series]) -> PolarsResult<Series> {
 
 #[derive(Deserialize)]
 pub struct MessageKwargs {
-    MessageType: String,
+    message_type: String,
 }
 
 #[polars_expr(output_type=String)]
 fn string_to_message(inputs: &[Series], kwargs: MessageKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
-    let message_type = kwargs.MessageType;
+    let message_type = kwargs.message_type;
 
     let out: StringChunked = ca.apply_to_buffer(|value: &str, output: &mut String| {
         write!(
@@ -56,40 +57,40 @@ fn string_to_message(inputs: &[Series], kwargs: MessageKwargs) -> PolarsResult<S
     });
     Ok(out.into_series())
 }
+// To be used later for the OpenAI API parsing
+// #[derive(Deserialize)]
+// pub struct BodyKwargs {
+//     Model: String,
+// }
 
-#[derive(Deserialize)]
-pub struct BodyKwargs {
-    Model: String,
-}
+// #[derive(Serialize, Deserialize, Debug)]
+// struct ChatCompletion {
+//     id: String,
+//     object: String,
+//     created: i64,
+//     model: String,
+//     choices: Vec<Choice>,
+//     usage: Usage,
+//     system_fingerprint: String,
+// }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct ChatCompletion {
-    id: String,
-    object: String,
-    created: i64,
-    model: String,
-    choices: Vec<Choice>,
-    usage: Usage,
-    system_fingerprint: String,
-}
+// #[derive(Serialize, Deserialize, Debug)]
+// struct Choice {
+//     index: i32,
+//     message: Message,
+//     logprobs: Option<serde_json::Value>, // Use serde_json::Value if the structure is not defined or varies
+//     finish_reason: String,
+// }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Choice {
-    index: i32,
-    message: Message,
-    logprobs: Option<serde_json::Value>, // Use serde_json::Value if the structure is not defined or varies
-    finish_reason: String,
-}
+// #[derive(Serialize, Deserialize, Debug)]
+// struct Message {
+//     role: String,
+//     content: String,
+// }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct Usage {
-    prompt_tokens: i32,
-    completion_tokens: i32,
-    total_tokens: i32,
-}
+// #[derive(Serialize, Deserialize, Debug)]
+// struct Usage {
+//     prompt_tokens: i32,
+//     completion_tokens: i32,
+//     total_tokens: i32,
+// }

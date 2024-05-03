@@ -8,8 +8,8 @@ use serde_json::json;
 #[derive(Debug)]
 pub enum FetchError {
     Http(u16, String), // Status code and error message
-    Serialization(serde_json::Error),
-    Reqwest(reqwest::Error),
+    // Serialization(serde_json::Error), // May be needed in future
+    // Reqwest(reqwest::Error), // May be needed in future
     ReadBody(std::io::Error), // Changed from ureq::Error to std::io::Error
 }
 
@@ -17,9 +17,9 @@ impl fmt::Display for FetchError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             FetchError::Http(code, ref message) => write!(f, "HTTP Error {}: {}", code, message),
-            FetchError::Serialization(ref err) => write!(f, "Serialization Error: {}", err),
+            // FetchError::Serialization(ref err) => write!(f, "Serialization Error: {}", err),
             FetchError::ReadBody(ref err) => write!(f, "Error reading body: {}", err),
-            FetchError::Reqwest(ref err) => write!(f, "Request Error: {}", err),
+            // FetchError::Reqwest(ref err) => write!(f, "Request Error: {}", err),
         }
     }
 }
@@ -91,7 +91,6 @@ pub fn fetch_api_response_sync(msg: &str, model: &str) -> Result<String, FetchEr
         "messages": [{"role": "user", "content": msg}],
         "model": model
     }).to_string();
-    // Get enviorment variable "OPENAI_API_KEY"
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "".to_string());
     let auth = format!("Bearer {}", api_key);
     let response = agent.post("https://api.openai.com/v1/chat/completions")

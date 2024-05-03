@@ -12,7 +12,8 @@ use pyo3::types::PyModule;
 use pyo3::{pymodule, PyResult, Python};
 
 #[pymodule]
-fn polar_llama(_py: Python, m: &PyModule) -> PyResult<()> {
+#[allow(deprecated)]
+fn polar_llama(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
