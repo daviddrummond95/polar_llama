@@ -64,6 +64,8 @@ We welcome contributions to Polar Llama! If you're interested in improving the l
 
 Polar Llama is released under the MIT license. For more details, see the LICENSE file in the repository.
 
----
+#### Roadmap
 
-This README provides a basic guide to getting started with Polar Llama, highlighting its key features and advantages for users needing high-performance inference capabilities.
+- [ ] **Reponse Handling**: Implement mechanisms to handle and process responses from parallel inference calls.
+- [ ] **Support for Additional APIs**: Extend support to other APIs for parallel inference processing.
+- [ ] **Function Calling**: Add support for using the function calls and structured data outputs for inference requests.
