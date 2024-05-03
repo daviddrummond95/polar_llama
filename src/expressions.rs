@@ -15,7 +15,7 @@ static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create 
 fn inference(inputs: &[Series]) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
     let out = ca.apply_to_buffer(|value: &str, output: &mut String| {
-        let response = fetch_api_response_sync(&value, "gpt-4-turbo");
+        let response = fetch_api_response_sync(value, "gpt-4-turbo");
         response.unwrap().chars().for_each(|c| output.push(c));
     });
     Ok(out.into_series())

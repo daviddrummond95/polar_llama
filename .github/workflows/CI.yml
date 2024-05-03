@@ -63,6 +63,7 @@ jobs:
         run: |
           echo "OPENSSL_DIR=/usr/lib/ssl" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+          pkg-config --libs --cflags openssl
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
