@@ -59,12 +59,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
 
-      - name: Set environment variables
+      - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
           echo "OPENSSL_DIR=/usr/lib/ssl" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig" >> $GITHUB_ENV
-          echo "RUST_BACKTRACE=1" >> $GITHUB_ENV
-          pkg-config --libs --cflags openssl
+          echo "OPENSSL_LIB_DIR=/usr/lib/ssl/lib" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/lib/ssl/include" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig" >> $GITHUB_ENV
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
