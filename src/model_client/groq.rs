@@ -4,6 +4,7 @@ use super::{ModelClient, ModelClientError, Message, Provider};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct GroqCompletion {
     id: String,
     model: String,
@@ -12,6 +13,7 @@ struct GroqCompletion {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct GroqChoice {
     index: i32,
     message: GroqMessage,
@@ -19,12 +21,14 @@ struct GroqChoice {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct GroqMessage {
     role: String,
     content: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct GroqUsage {
     prompt_tokens: i32,
     completion_tokens: i32,
@@ -54,6 +58,12 @@ impl GroqClient {
     #[deprecated(since = "0.2.0", note = "Use new_with_model instead")]
     pub fn with_model(model: &str) -> Self {
         Self::new_with_model(model)
+    }
+}
+
+impl Default for GroqClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

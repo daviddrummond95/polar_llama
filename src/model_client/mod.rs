@@ -9,6 +9,8 @@ use std::fmt;
 use serde_json::Value;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+use futures;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Provider {
@@ -27,14 +29,19 @@ impl Provider {
             Provider::Groq => "groq",
         }
     }
-    
-    pub fn from_str(s: &str) -> Option<Self> {
+}
+
+// Implement FromStr trait for Provider
+impl FromStr for Provider {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "openai" => Some(Provider::OpenAI),
-            "anthropic" => Some(Provider::Anthropic),
-            "gemini" => Some(Provider::Gemini),
-            "groq" => Some(Provider::Groq),
-            _ => None,
+            "openai" => Ok(Provider::OpenAI),
+            "anthropic" => Ok(Provider::Anthropic),
+            "gemini" => Ok(Provider::Gemini),
+            "groq" => Ok(Provider::Groq),
+            _ => Err(format!("Unknown provider: {}", s)),
         }
     }
 }
@@ -164,7 +171,6 @@ pub async fn fetch_data_generic<T: ModelClient + Sync + ?Sized>(
             content: content.clone(),
         };
         let messages = vec![formatted_message];
-        let client = client;
         let reqwest_client = &reqwest_client;
         
         async move {

@@ -15,6 +15,7 @@ struct GeminiCandidate {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct GeminiContent {
     parts: Vec<GeminiPart>,
     role: String,
@@ -56,6 +57,12 @@ impl GeminiClient {
     pub fn with_api_key(mut self, api_key: &str) -> Self {
         self.api_key = Some(api_key.to_string());
         self
+    }
+}
+
+impl Default for GeminiClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

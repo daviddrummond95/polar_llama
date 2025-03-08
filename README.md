@@ -28,7 +28,10 @@ Here’s how you can use Polar Llama to send multiple inference requests in para
 
 ```python
 import polars as pl
-from polar_llama import string_to_message, inference_async
+from polar_llama import string_to_message, inference_async, Provider
+import dotenv
+
+dotenv.load_dotenv()
 
 # Example questions
 questions = [
@@ -46,7 +49,7 @@ df = df.with_columns(
 
 # Sending parallel inference requests
 df = df.with_columns(
-    answer=inference_async('prompt')
+    answer=inference_async('prompt', provider = Provider.OPENAI, model = 'gpt-4o-mini')
 )
 ```
 

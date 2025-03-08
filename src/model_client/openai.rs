@@ -4,6 +4,7 @@ use super::{ModelClient, ModelClientError, Message, Provider};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAICompletion {
     id: String,
     object: String,
@@ -14,6 +15,7 @@ struct OpenAICompletion {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAIChoice {
     index: i32,
     message: OpenAIMessage,
@@ -21,12 +23,14 @@ struct OpenAIChoice {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAIMessage {
     role: String,
     content: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAIUsage {
     prompt_tokens: i32,
     completion_tokens: i32,
@@ -56,6 +60,12 @@ impl OpenAIClient {
     #[deprecated(since = "0.2.0", note = "Use new_with_model instead")]
     pub fn with_model(model: &str) -> Self {
         Self::new_with_model(model)
+    }
+}
+
+impl Default for OpenAIClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

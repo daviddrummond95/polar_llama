@@ -8,11 +8,12 @@ use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
 use std::borrow::Cow;
 use tokio::runtime::Runtime;
+use std::str::FromStr;
 
 // Initialize a global runtime for all async operations
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create Tokio runtime"));
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct InferenceKwargs {
     #[serde(default)]
     provider: Option<String>,
@@ -21,13 +22,7 @@ pub struct InferenceKwargs {
 }
 
 fn parse_provider(provider_str: &str) -> Option<Provider> {
-    match provider_str.to_lowercase().as_str() {
-        "openai" => Some(Provider::OpenAI),
-        "anthropic" => Some(Provider::Anthropic),
-        "gemini" => Some(Provider::Gemini),
-        "groq" => Some(Provider::Groq),
-        _ => None,
-    }
+    Provider::from_str(provider_str).ok()
 }
 
 #[polars_expr(output_type=String)]
@@ -43,7 +38,7 @@ fn inference(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series>
             let response = match &kwargs.provider {
                 Some(provider_str) => {
                     // Try to parse provider string to Provider enum
-                    if let Some(provider) = parse_provider(provider_str) {
+                    if let Some(_provider) = parse_provider(provider_str) {
                         // For now, we'll still use OpenAI since we don't have a sync version with provider
                         fetch_api_response_sync(value, &model)
                     } else {

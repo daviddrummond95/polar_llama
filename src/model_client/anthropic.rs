@@ -5,6 +5,7 @@ use serde::Deserialize;
 use reqwest::Client;
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct AnthropicResponse {
     id: String,
     model: String,
@@ -41,6 +42,12 @@ impl AnthropicClient {
     #[deprecated(since = "0.2.0", note = "Use new_with_model instead")]
     pub fn with_model(model: &str) -> Self {
         Self::new_with_model(model)
+    }
+}
+
+impl Default for AnthropicClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -11,9 +11,10 @@ static ALLOC: Jemalloc = Jemalloc;
 
 use pyo3::prelude::*;
 use model_client::Provider;
+use std::str::FromStr;
 
 // Make PyProvider available at module level for Python
-#[pyclass]
+#[pyclass(name = "Provider")]
 #[derive(Clone)]
 pub struct PyProvider(Provider);
 
@@ -34,9 +35,9 @@ impl PyProvider {
     #[new]
     fn new(provider_str: &str) -> PyResult<Self> {
         match Provider::from_str(provider_str) {
-            Some(provider) => Ok(PyProvider(provider)),
-            None => Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Invalid provider: {}", provider_str)
+            Ok(provider) => Ok(PyProvider(provider)),
+            Err(err) => Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Invalid provider: {}", err)
             )),
         }
     }
