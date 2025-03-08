@@ -65,7 +65,7 @@ impl OpenAIClient {
 
 impl Default for OpenAIClient {
     fn default() -> Self {
-        Self::new()
+        Self::new_with_model("gpt-4o-mini")
     }
 }
 

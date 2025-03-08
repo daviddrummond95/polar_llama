@@ -63,7 +63,7 @@ impl GroqClient {
 
 impl Default for GroqClient {
     fn default() -> Self {
-        Self::new()
+        Self::new_with_model("llama3-70b-8192")
     }
 }
 

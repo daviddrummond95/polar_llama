@@ -62,7 +62,7 @@ impl GeminiClient {
 
 impl Default for GeminiClient {
     fn default() -> Self {
-        Self::new()
+        Self::new_with_model("gemini-1.5-pro")
     }
 }
 
