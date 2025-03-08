@@ -47,7 +47,7 @@ impl AnthropicClient {
 
 impl Default for AnthropicClient {
     fn default() -> Self {
-        Self::new()
+        Self::new_with_model("claude-3-opus-20240229")
     }
 }
 
