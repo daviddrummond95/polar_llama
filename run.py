@@ -1,79 +1,32 @@
 from matplotlib.cbook import print_cycles
 import polars as pl
-from polar_llama import inference_async, string_to_message
+from polar_llama import inference_async, string_to_message, Provider
 import os
 from time import time
 import numpy as np
 import matplotlib.pyplot as plt
+import dotenv
 
+dotenv.load_dotenv()
 
 # Set the POLARS_VERBOSE environment variable
 os.environ['POLARS_VERBOSE'] = '1'
 
-
-def time_function(func, dataframe, column_name, print_output=False):
-    """Measure the time taken by a function to execute."""
-    start = time()
-    result = dataframe.with_columns(
-        pig_latin = func(column_name)
-    )
-    if print_output:
-        print('Result:', result.to_pandas()['pig_latin'][0])
-    end = time()
-    return end - start, result
-
-def run_experiments(questions, num_runs=1):
-    """Run synchronous and asynchronous inference and collect timing data."""
-    # Prepare data structures to store times
-    sync_times = []
-    async_times = []
-    question_counts = list(range(5, len(questions), 10))
-
-    # Loop over different question set sizes
-    for count in question_counts:
-        print(f'Running experiments for {count} questions')
-        sync_run_times = []
-        async_run_times = []
-
-
-        # Perform multiple runs to average the results
-        for run in range(num_runs):
-            df = pl.DataFrame({'Questions': questions[:count]})
-
-            # # Time synchronous function
-            # time_taken, _ = time_function(inference, df, 'Questions', print_output)
-            # sync_run_times.append(time_taken)
-            # print(f'Synchronous run time: {time_taken:.2f} seconds')
-
-            # Time asynchronous function
-            time_taken, _ = time_function(inference_async, df, 'Questions')
-            async_run_times.append(time_taken)
-            print(f'Asynchronous run time: {time_taken:.2f} seconds')
-
-        # Compute average time for current number of questions
-        # sync_times.append(np.mean(sync_run_times))
-        # async_times.append(np.mean(async_run_times))
-        # # print(f'Average synchronous time: {sync_times[-1]:.2f} seconds')
-        # print(f'Average asynchronous time: {async_times[-1]:.2f} seconds')
-
-    return question_counts, sync_times, async_times
-
-def plot_results(question_counts, sync_times, async_times):
-    """Plot the results of the experiments."""
-    plt.figure(figsize=(10, 5))
-    # plt.plot(question_counts, sync_times, label='Synchronous', marker='o')
-    plt.plot(question_counts, async_times, label='Asynchronous', marker='o')
-    plt.xlabel('Number of Questions')
-    plt.ylabel('Average Time Taken (seconds)')
-    plt.title('Performance of Asynchronous Inference Based on Number of Questions')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
 def main():
-    questions = ['What is the capital of France?',
+    # Check for each provider API key
+    for provider in ['OPENAI', 'GROQ', 'ANTHROPIC', 'GEMINI']:
+        api_key = os.environ.get(provider+"_API_KEY")
+        if not api_key:
+            print(f"Error: {provider} API key is not set.")
+            return
+
+    print("PolarLlama - OpenAI Integration for Polars")
+    print("------------------------------------------")
+    
+    # Sample questions for demonstration
+    questions = [
+        'What is the capital of France?',
         'Who are the founders of OpenAI?',
-        'Where is the global headquarters of Fractal Analytics?',
         'What are the advantages of polars vs pandas?',
         'Write a simple script in python that takes a list of numbers and returns the sum of the numbers.',
         'What is the capital of India?',
@@ -168,16 +121,35 @@ def main():
         'What year was the first smartphone released?'
     ]
 
-    df = pl.DataFrame({'Questions': questions[0:10]})
-
+    # Create a DataFrame with the questions
+    df = pl.DataFrame({'Questions': questions})
+    
+    print(f"\nProcessing {len(questions)} questions...")
+    
+    # Convert questions to messages
     df = df.with_columns(
         prompt = string_to_message("Questions", message_type = 'user'),
     )
+    start_time = time()
+    # Run inference
     df = df.with_columns(
-        answer = inference_async('prompt')
+        openai_answer = inference_async('prompt', provider = Provider.OPENAI, model = 'gpt-4o-mini'),
+        groq_answer = inference_async('prompt', provider = Provider.GROQ, model = 'llama3-8b-8192'),
+        anthropic_answer = inference_async('prompt', provider = Provider.ANTHROPIC, model = 'claude-3-5-sonnet-20240620'),
+        gemini_answer = inference_async('prompt', provider = Provider.GEMINI, model = 'gemini-2.0-flash-lite')
     )
-
-    print(df.to_pandas()['answer'][0])
-
+    end_time = time()
+    
+    
+    # Display results
+    print("\nResults:")
+    print("--------")
+    for i, (question, openai_answer, groq_answer, anthropic_answer, gemini_answer) in enumerate(zip(df['Questions'][0:2], df['openai_answer'][0:2], df['groq_answer'][0:2], df['anthropic_answer'][0:2], df['gemini_answer'][0:2])):
+        print(f"\nQ{i+1}: {question}")
+        print(f"OpenAI Answer: {openai_answer}")
+        print(f"Groq Answer: {groq_answer}")
+        print(f"Anthropic Answer: {anthropic_answer}")
+        print(f"Gemini Answer: {gemini_answer}")
+    print(f"Time taken: {end_time - start_time} seconds")
 if __name__ == '__main__':
     main()
