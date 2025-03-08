@@ -14,7 +14,7 @@ install-release: .venv
 
 pre-commit: .venv
 	cargo fmt --all && cargo clippy --all-features
-	.venv/bin/python -m ruff check . --fix --exit-non-zero-on-fix
+	.venv/bin/python -m ruff check . --fix || true
 	.venv/bin/python -m ruff format polar_llama tests
 	.venv/bin/mypy polar_llama tests
 

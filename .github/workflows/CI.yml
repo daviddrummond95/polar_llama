@@ -59,21 +59,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y openssl libssl-dev pkg-config
 
-      - name: Install dependencies
+      - name: Configure OpenSSL
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
-          echo "OPENSSL_DIR=$(dirname $(dirname $(which openssl)))" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=/usr/lib/ssl/lib" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=/usr/lib/ssl/include" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/local/lib/pkgconfig:$(pkg-config --variable pc_path pkg-config)" >> $GITHUB_ENV
+          echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> $GITHUB_ENV
+
       - name: Check OpenSSL version and directories
         run: |
           openssl version
-          whereis openssl
-          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
-          echo "OPENSSL_DIR=$OPENSSL_DIR"
-          pkg-config --libs --cflags openssl
+          ls -la /usr/lib/x86_64-linux-gnu/libssl*
+          ls -la /usr/include/openssl
+          pkg-config --libs --cflags openssl || echo "pkg-config failed but we have the env vars set"
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -86,7 +84,7 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-linux-${{ matrix.target }}
           path: dist
 
   windows:
@@ -111,7 +109,7 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-windows-${{ matrix.target }}
           path: dist
 
   macos:
@@ -134,7 +132,7 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: wheels-macos-${{ matrix.target }}
           path: dist
 
   sdist:
@@ -149,7 +147,7 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
-          name: wheels
+          name: sdist
           path: dist
 
   release:
@@ -161,11 +159,24 @@ jobs:
     permissions:
       id-token: write # IMPORTANT: mandatory for trusted publishing
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: wheels
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+          
+      - name: List distribution files
+        run: ls -la dist/
+          
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         with:
           command: upload
-          args: --non-interactive --skip-existing *
+          args: --non-interactive --skip-existing dist/*
