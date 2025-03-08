@@ -59,27 +59,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y openssl libssl-dev pkg-config
 
-      - name: Configure OpenSSL
-        run: |
-          echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> $GITHUB_ENV
-
-      - name: Check OpenSSL version and directories
-        run: |
-          openssl version
-          ls -la /usr/lib/x86_64-linux-gnu/libssl*
-          ls -la /usr/include/openssl
-          pkg-config --libs --cflags openssl || echo "pkg-config failed but we have the env vars set"
-
+      # Using vendored OpenSSL approach
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --features vendored
           sccache: "true"
-          manylinux: auto
+          manylinux: 2014
+          # Install basic build dependencies
+          before-script-linux: |
+            yum install -y gcc make pkg-config
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -103,8 +93,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --features vendored
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -126,8 +115,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --features vendored
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -143,7 +131,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist
+          args: --out dist --features vendored
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
