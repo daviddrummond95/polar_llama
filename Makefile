@@ -15,8 +15,19 @@ install-release: .venv
 pre-commit: .venv
 	cargo fmt --all && cargo clippy --all-features
 	.venv/bin/python -m ruff check . --fix || true
-	.venv/bin/python -m ruff format polar_llama tests
-	.venv/bin/mypy polar_llama tests
+	if [ -d "polar_llama" ]; then \
+		.venv/bin/python -m ruff format polar_llama; \
+	fi
+	if [ -d "tests" ]; then \
+		.venv/bin/python -m ruff format tests; \
+	fi
+	if [ -d "polar_llama" ] && [ -d "tests" ]; then \
+		.venv/bin/mypy polar_llama tests; \
+	elif [ -d "polar_llama" ]; then \
+		.venv/bin/mypy polar_llama; \
+	elif [ -d "tests" ]; then \
+		.venv/bin/mypy tests; \
+	fi
 
 test: .venv
 	.venv/bin/python -m pytest tests

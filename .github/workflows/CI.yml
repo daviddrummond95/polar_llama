@@ -1,85 +1,167 @@
 name: CI
 
 on:
-  pull_request:
   push:
-    branches: [main]
+    branches:
+      - main
+      - master
+    tags:
+      - "*"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Make sure CI fails on all warnings, including Clippy lints
+env:
+  RUSTFLAGS: "-Dwarnings"
 
 jobs:
+  linux_tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64]
+        python-version: ["3.8", "3.9", "3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up Rust
+        run: rustup show
+      - uses: mozilla-actions/sccache-action@v0.0.3
+      - run: make .venv
+      - run: make pre-commit
+      - run: make install
+      - run: make test
+
   linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssl libssl-dev pkg-config
+
+      # Simplified approach for building wheels
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: "true"
+          manylinux: auto
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: [x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          architecture: ${{ matrix.target }}
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: "true"
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.target }}
+          path: dist
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --find-interpreter
+          sccache: "true"
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist
+
+  sdist:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
         with:
-          python-version: "3.11"
-      - name: Install the latest version of uv
-        uses: astral-sh/setup-uv@v2
+          command: sdist
+          args: --out dist
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
         with:
-          version: "latest"
-      - run: uv --version
-      - name: Install cookiecutter tool
-        run: |
-          uv venv
-          uv pip install -U cookiecutter pip
-      - name: Create plugin
-        run: |
-          . .venv/bin/activate
-          cookiecutter . --no-input
-      - name: Create environment and install dependencies
-        run: |
-          uv venv --seed
-          . .venv/bin/activate
-          uv pip install -U polars maturin mypy pytest pip
-          maturin develop
-        working-directory: my_plugin
-      - name: Run linting and tests
-        run: |
-          . .venv/bin/activate
-          mypy my_plugin tests
-          pytest
-        working-directory: my_plugin
-      - name: Check version
-        run: |
-          . .venv/bin/activate
-          python -c 'import my_plugin; print(my_plugin.__version__)'
-        working-directory: my_plugin
-  windows:
-    runs-on: windows-latest
+          name: sdist
+          path: dist
+
+  release:
+    name: Release
+    if: "startsWith(github.ref, 'refs/tags/')"
+    needs: [linux, windows, macos, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # IMPORTANT: mandatory for trusted publishing
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          python-version: "3.11"
-      - name: Install the latest version of uv
-        uses: astral-sh/setup-uv@v2
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
+      
+      - name: Download sdist
+        uses: actions/download-artifact@v4
         with:
-          version: "latest"
-      - run: uv --version
-      - name: Install cookiecutter tool
-        run: |
-          uv venv
-          . .venv\Scripts\activate
-          uv pip install -U cookiecutter pip
-      - name: Create plugin
-        run: |
-          . .venv\Scripts\activate
-          cookiecutter . --no-input
-      - name: Create environment and install dependencies
-        run: |
-          uv venv --seed
-          . .venv\Scripts\activate
-          uv pip install -U polars maturin mypy pytest pip
-          maturin develop
-        working-directory: my_plugin
-      - name: Run linting and tests
-        run: |
-          . .venv\Scripts\activate
-          mypy my_plugin tests
-          pytest
-        working-directory: my_plugin
-      - name: Check version
-        run: |
-          . .venv\Scripts\activate
-          python -c 'import my_plugin; print(my_plugin.__version__)'
-        working-directory: my_plugin
+          name: sdist
+          path: dist
+          
+      - name: List distribution files
+        run: ls -la dist/
+          
+      - name: Publish to PyPI
+        uses: PyO3/maturin-action@v1
+        with:
+          command: upload
+          args: --non-interactive --skip-existing dist/*
