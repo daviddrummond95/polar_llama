@@ -7,7 +7,7 @@ import polars as pl
 
 # Import the register_expressions function to ensure it gets called
 try:
-    from polar_llama.polar_llama import register_expressions
+    from polar_llama import register_expressions
     # Call it to make sure expressions are registered
     register_expressions()
 except ImportError:
