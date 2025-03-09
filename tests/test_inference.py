@@ -24,11 +24,16 @@ def test_inference():
     result = df.with_columns(
         answer=inference_async('prompt', provider = Provider.OPENAI, model = 'gpt-4o-mini')
     )
+    
+    # Select only the columns we want to compare
+    result_comparison = result.select(["Questions", "answer"])
+    
     expected_df = pl.DataFrame(
         {
-            "Questions": ["What is the capital of France?", "What is the capital of India?"],
+            "Questions": ["What is the capital of France? Respond with only the city name and no other text.", 
+                         "What is the capital of India? Respond with only the city name and no other text."],
             "answer": ["Paris", "New Delhi"],
         }
     )
 
-    assert result.equals(expected_df)
+    assert result_comparison.equals(expected_df)
