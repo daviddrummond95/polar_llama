@@ -87,7 +87,7 @@ jobs:
           import sys
           sys.path.append('.venv/lib/python*/site-packages/')
           try:
-              from polar_llama.polar_llama import Provider
+              from polar_llama import Provider
               print('Provider enum available:', Provider is not None)
               print('Provider dir:', dir(Provider))
           except ImportError as e:
