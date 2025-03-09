@@ -13,8 +13,9 @@ def test_basic_import():
         })
         
         # Just verify that we can use polars with our dataframe
+        # Using 'len()' instead of 'lengths()' which is more universally supported
         result = df.with_columns(
-            question_length=pl.col("question").str.lengths()
+            question_length=pl.col("question").str.len_chars()
         )
         
         # Assert that the dataframe has the expected columns

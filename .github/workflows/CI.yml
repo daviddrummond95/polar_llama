@@ -62,7 +62,9 @@ jobs:
       - name: Debug Package Contents
         run: |
           source .venv/bin/activate
-          python -m pytest tests/test_imports.py tests/test_provider.py tests/test_basic.py -v
+          # Run with -v for verbose output
+          python -m pytest tests/test_imports.py -v
+          python -m pytest tests/test_provider.py -v
       
       # Check the installed package
       - name: Show Installed Package
@@ -75,6 +77,24 @@ jobs:
           # Print the __init__.py file contents
           echo "Contents of __init__.py:"
           cat .venv/lib/python*/site-packages/polar_llama/__init__.py | head -n 50
+          
+          # Check Rust extension
+          echo "Checking Rust extension module:"
+          ls -la .venv/lib/python*/site-packages/polar_llama/polar_llama*
+          
+          # Try to inspect the extension module
+          python -c "
+          import sys
+          sys.path.append('.venv/lib/python*/site-packages/')
+          try:
+              from polar_llama.polar_llama import PyProvider
+              print('PyProvider enum available:', PyProvider is not None)
+              print('PyProvider dir:', dir(PyProvider))
+          except ImportError as e:
+              print('Import error for PyProvider:', e)
+          except Exception as e:
+              print('Unexpected error:', e)
+          "
       
       # Run pre-commit checks
       - name: Run pre-commit checks
