@@ -58,6 +58,24 @@ jobs:
           maturin build --release
           pip install target/wheels/*.whl
       
+      # Run package inspection tests
+      - name: Debug Package Contents
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/test_imports.py tests/test_provider.py tests/test_basic.py -v
+      
+      # Check the installed package
+      - name: Show Installed Package
+        run: |
+          source .venv/bin/activate
+          pip show polar-llama
+          pip list
+          ls -la .venv/lib/python*/site-packages/polar_llama/
+          
+          # Print the __init__.py file contents
+          echo "Contents of __init__.py:"
+          cat .venv/lib/python*/site-packages/polar_llama/__init__.py | head -n 50
+      
       # Run pre-commit checks
       - name: Run pre-commit checks
         run: |
@@ -78,12 +96,12 @@ jobs:
             python -m mypy --ignore-missing-imports tests || true
           fi
       
-      # Run tests
-      - name: Run tests
+      # Run all tests
+      - name: Run All Tests
         run: |
           source .venv/bin/activate
-          python -m pytest tests
-
+          python -m pytest tests -v
+      
   linux:
     runs-on: ubuntu-latest
     strategy:
