@@ -1,10 +1,8 @@
-from matplotlib.cbook import print_cycles
 import polars as pl
 from polar_llama import inference_async, string_to_message, Provider
 import os
 from time import time
 import numpy as np
-import matplotlib.pyplot as plt
 import dotenv
 
 dotenv.load_dotenv()
