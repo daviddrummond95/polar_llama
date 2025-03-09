@@ -47,12 +47,20 @@ impl PyProvider {
     }
 }
 
+// The crucial fix: We need to add this attribute to register the polars expressions
+// This will ensure that pyo3_polars properly registers the expression functions defined in expressions.rs
+#[pyo3_polars::pyo3_register_polars_expressions]
+
 #[pymodule]
 fn polar_llama(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.setattr("__version__", env!("CARGO_PKG_VERSION"))?;
     
     // Add the PyProvider class to the module
     m.add_class::<PyProvider>()?;
+    
+    // Register the Polars expressions - this line is optional since the #[pyo3_register_polars_expressions]
+    // attribute above should handle this, but including it for extra clarity
+    pyo3_polars::register(_py, m)?;
     
     Ok(())
 }
