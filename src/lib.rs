@@ -49,7 +49,7 @@ impl PyProvider {
 
 // Register expression functions with the Python module
 #[pyfunction]
-fn register_expressions(py: Python<'_>) -> PyResult<&'static str> {
+fn register_expressions(_py: Python<'_>) -> PyResult<&'static str> {
     // We don't need to do anything here since the expressions are registered by the polars_expr macro
     // This function exists just to make it explicit in the code that the expressions are registered
     Ok("Expressions registered successfully")
