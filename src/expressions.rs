@@ -25,6 +25,7 @@ fn parse_provider(provider_str: &str) -> Option<Provider> {
     Provider::from_str(provider_str).ok()
 }
 
+// This polars_expr annotation registers the function with Polars at build time
 #[polars_expr(output_type=String)]
 fn inference(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
@@ -54,6 +55,7 @@ fn inference(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series>
     Ok(out.into_series())
 }
 
+// Register the asynchronous inference function with Polars
 #[polars_expr(output_type=String)]
 fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
@@ -112,6 +114,7 @@ pub struct MessageKwargs {
     message_type: String,
 }
 
+// Register the string_to_message function with Polars
 #[polars_expr(output_type=String)]
 fn string_to_message(inputs: &[Series], kwargs: MessageKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
