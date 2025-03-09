@@ -21,7 +21,7 @@ def test_package_contents():
         print(f"{func} in polar_llama: {func in contents}")
     
     # Check for the extension module
-    extension_name = 'polar_llama.polar_llama'
+    extension_name = 'polar_llama'
     extension_available = importlib.util.find_spec(extension_name) is not None
     print(f"Extension module available: {extension_available}")
     
@@ -58,11 +58,11 @@ def test_package_contents():
             for i, line in enumerate(lines[:50]):
                 print(f"{i+1}: {line.rstrip()}")
                 
-            # Check if there are any errors in importing from polar_llama.polar_llama
-            if "from polar_llama.polar_llama import PyProvider as Provider" in "".join(lines):
+            # Check if there are any errors in importing from polar_llama
+            if "from polar_llama import PyProvider as Provider" in "".join(lines):
                 print("\nTrying to import PyProvider directly:")
                 try:
-                    from polar_llama.polar_llama import PyProvider
+                    from polar_llama import PyProvider
                     print("PyProvider imported successfully")
                 except ImportError as e:
                     print(f"Error importing PyProvider: {e}")
