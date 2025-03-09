@@ -18,7 +18,26 @@ else:
     lib = Path(__file__).parent
 
 # Import Provider enum directly from the extension module
-from polar_llama.polar_llama import Provider
+try:
+    # First try relative import from the extension module in current directory
+    from .polar_llama import Provider
+except ImportError:
+    # Fallback to try absolute import
+    try:
+        from polar_llama.polar_llama import Provider
+    except ImportError:
+        # Define a basic Provider class as fallback if neither import works
+        class Provider:
+            OPENAI = "openai"
+            ANTHROPIC = "anthropic"
+            GEMINI = "gemini"
+            GROQ = "groq"
+            
+            def __init__(self, provider_str):
+                self.value = provider_str
+                
+            def __str__(self):
+                return self.value
 
 # Import and initialize the expressions helper to ensure expressions are registered
 from polar_llama.expressions import ensure_expressions_registered, get_lib_path
