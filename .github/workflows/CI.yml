@@ -59,32 +59,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y openssl libssl-dev pkg-config
 
-      # Comprehensive approach for building wheels with OpenSSL
+      # Most basic approach for building wheels, using the stable manylinux image
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter
           sccache: "true"
-          manylinux: "2014"
-          before-script-linux: |
-            # Install required dependencies for OpenSSL
-            yum install -y perl perl-core openssl-devel pkgconfig
-            # Set environment variables for OpenSSL
-            export OPENSSL_DIR=/usr
-            export OPENSSL_INCLUDE_DIR=/usr/include
-            export OPENSSL_LIB_DIR=/usr/lib64
-            # Debug information
-            echo "OpenSSL installation:"
-            ls -la /usr/include/openssl
-            ls -la /usr/lib64/libssl*
-            # Try pkg-config
-            pkg-config --libs --cflags openssl || echo "pkg-config failed, but environment variables are set"
-            # Set environment variables in a way that cargo can find them
-            echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
-            echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-            echo "OPENSSL_LIB_DIR=/usr/lib64" >> $GITHUB_ENV
-          docker-options: "-e OPENSSL_DIR=/usr -e OPENSSL_INCLUDE_DIR=/usr/include -e OPENSSL_LIB_DIR=/usr/lib64"
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
