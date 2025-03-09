@@ -59,17 +59,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y openssl libssl-dev pkg-config
 
-      # Using vendored OpenSSL approach
+      # Try using system OpenSSL instead of vendoring
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features vendored
+          args: --release --out dist --find-interpreter
           sccache: "true"
           manylinux: 2014
-          # Install basic build dependencies
+          container-options: -e OPENSSL_DIR=/usr -e OPENSSL_INCLUDE_DIR=/usr/include -e OPENSSL_LIB_DIR=/usr/lib64
+          # Install basic build dependencies including OpenSSL
           before-script-linux: |
-            yum install -y gcc make pkgconfig
+            yum install -y gcc make pkgconfig openssl-devel perl perl-IPC-Cmd perl-core
+            # Debug info
+            ls -la /usr/lib64/libssl*
+            ls -la /usr/include/openssl || echo "No OpenSSL headers found in expected location"
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -93,7 +97,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features vendored
+          args: --release --out dist --find-interpreter
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -115,7 +119,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features vendored
+          args: --release --out dist --find-interpreter
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -131,7 +135,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist --features vendored
+          args: --out dist
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
