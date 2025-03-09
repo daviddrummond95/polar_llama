@@ -47,7 +47,7 @@ jobs:
           python -m virtualenv .venv
           source .venv/bin/activate
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest python-dotenv
           echo "VIRTUAL_ENV=$VIRTUAL_ENV" >> $GITHUB_ENV
           echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
       
@@ -120,6 +120,11 @@ jobs:
       - name: Run All Tests
         run: |
           source .venv/bin/activate
+          # Set dummy API keys to prevent errors in tests that might still use dotenv
+          export OPENAI_API_KEY="dummy_key"
+          export ANTHROPIC_API_KEY="dummy_key"
+          export GROQ_API_KEY="dummy_key"
+          export GEMINI_API_KEY="dummy_key"
           python -m pytest tests -v
       
   linux:
