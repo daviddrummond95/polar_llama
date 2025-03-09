@@ -39,21 +39,29 @@ jobs:
         run: rustup show
       - uses: mozilla-actions/sccache-action@v0.0.3
       
-      # Install dependencies
-      - name: Install dependencies
+      # Install dependencies and create virtualenv
+      - name: Install dependencies and create virtualenv
         run: |
           python -m pip install --upgrade pip
+          python -m pip install virtualenv
+          python -m virtualenv .venv
+          source .venv/bin/activate
           pip install -r requirements.txt
-          pip install maturin
+          pip install pytest
+          echo "VIRTUAL_ENV=$VIRTUAL_ENV" >> $GITHUB_ENV
+          echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
       
-      # Build and install the package directly with maturin
+      # Build and install the package with maturin
       - name: Build and install package
         run: |
-          maturin develop --release
+          source .venv/bin/activate
+          maturin build --release
+          pip install target/wheels/*.whl
       
       # Run pre-commit checks
       - name: Run pre-commit checks
         run: |
+          source .venv/bin/activate
           cargo fmt --all && cargo clippy --all-features
           python -m ruff check . --fix || true
           if [ -d "polar_llama" ]; then
@@ -73,6 +81,7 @@ jobs:
       # Run tests
       - name: Run tests
         run: |
+          source .venv/bin/activate
           python -m pytest tests
 
   linux:
