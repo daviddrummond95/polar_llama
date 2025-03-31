@@ -1,6 +1,6 @@
 ### README for Polar Llama
 
-![Logo](PolarLlama.webp)
+![Logo](https://raw.githubusercontent.com/daviddrummond95/polar_llama/refs/heads/main/PolarLlama.webp)
 
 #### Overview
 
@@ -11,20 +11,26 @@ Polar Llama is a Python library designed to enhance the efficiency of making par
 - **Parallel Inference**: Send multiple inference requests in parallel to the ChatGPT API without waiting for each individual request to complete.
 - **Integration with Polars**: Utilizes the Polars dataframe for organizing and handling requests, leveraging its efficient data processing capabilities.
 - **Easy to Use**: Simplifies the process of sending queries and retrieving responses from the ChatGPT API through a clean and straightforward interface.
+- **Multi-Message Support**: Create and process conversations with multiple messages in context, supporting complex multi-turn interactions.
+- **Multiple Provider Support**: Works with OpenAI, Anthropic, Gemini, and Groq models, giving you flexibility in your AI infrastructure.
 
 #### Installation
 
-To install Polar Llama, use will need to execute the folloiwng bash command:
+To install Polar Llama, you can use pip:
+
+```bash
+pip install polar-llama
+```
+
+Alternatively, for development purposes, you can install from source:
 
 ```bash
 maturin develop
 ```
 
-I will be making the package available on PyPI soon.
-
 #### Example Usage
 
-Here’s how you can use Polar Llama to send multiple inference requests in parallel:
+Here's how you can use Polar Llama to send multiple inference requests in parallel:
 
 ```python
 import polars as pl
@@ -53,11 +59,53 @@ df = df.with_columns(
 )
 ```
 
+#### Multi-Message Conversations
+
+Polar Llama now supports multi-message conversations, allowing you to maintain context across multiple turns:
+
+```python
+import polars as pl
+from polar_llama import string_to_message, combine_messages, inference_messages
+import dotenv
+
+dotenv.load_dotenv()
+
+# Create a dataframe with system prompts and user questions
+df = pl.DataFrame({
+    "system_prompt": [
+        "You are a helpful assistant.",
+        "You are a math expert."
+    ],
+    "user_question": [
+        "What's the weather like today?",
+        "Solve x^2 + 5x + 6 = 0"
+    ]
+})
+
+# Convert to structured messages
+df = df.with_columns([
+    pl.col("system_prompt").invoke("string_to_message", message_type="system").alias("system_message"),
+    pl.col("user_question").invoke("string_to_message", message_type="user").alias("user_message")
+])
+
+# Combine into conversations
+df = df.with_columns(
+    pl.invoke("combine_messages", pl.col("system_message"), pl.col("user_message")).alias("conversation")
+)
+
+# Send to model and get responses
+df = df.with_columns(
+    pl.col("conversation").invoke("inference_messages", provider="openai", model="gpt-4").alias("response")
+)
+```
+
 #### Benefits
 
 - **Speed**: Processes multiple queries in parallel, drastically reducing the time required for bulk query handling.
 - **Scalability**: Scales efficiently with the increase in number of queries, ideal for high-demand applications.
 - **Ease of Integration**: Integrates seamlessly into existing Python projects that utilize Polars, making it easy to add parallel processing capabilities.
+- **Context Preservation**: Maintain conversation context with multi-message support for more natural interactions.
+- **Provider Flexibility**: Choose from multiple LLM providers based on your needs and access.
 
 #### Contributing
 
@@ -69,6 +117,7 @@ Polar Llama is released under the MIT license. For more details, see the LICENSE
 
 #### Roadmap
 
-- [ ] **Reponse Handling**: Implement mechanisms to handle and process responses from parallel inference calls.
-- [ ] **Support for Additional APIs**: Extend support to other APIs for parallel inference processing.
+- [x] **Multi-Message Support**: Support for multi-message conversations to maintain context.
+- [x] **Multiple Provider Support**: Support for different LLM providers (OpenAI, Anthropic, Gemini, Groq).
 - [ ] **Function Calling**: Add support for using the function calls and structured data outputs for inference requests.
+- [ ] **Streaming Responses**: Support for streaming responses from LLM providers.
