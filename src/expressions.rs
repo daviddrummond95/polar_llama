@@ -25,6 +25,17 @@ fn parse_provider(provider_str: &str) -> Option<Provider> {
     Provider::from_str(provider_str).ok()
 }
 
+/// Get default model for a given provider
+fn get_default_model(provider: Provider) -> &'static str {
+    match provider {
+        Provider::OpenAI => "gpt-4-turbo",
+        Provider::Anthropic => "claude-3-opus-20240229",
+        Provider::Gemini => "gemini-1.5-pro",
+        Provider::Groq => "llama3-70b-8192",
+        Provider::Bedrock => "anthropic.claude-3-haiku-20240307-v1:0",
+    }
+}
+
 // This polars_expr annotation registers the function with Polars at build time
 #[polars_expr(output_type=String)]
 fn inference(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
@@ -80,14 +91,7 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
             // Try to parse provider string to Provider enum
             if let Some(provider) = parse_provider(provider_str) {
                 // Use provider with default model
-                // Default models are defined in the client implementations
-                let default_model = match provider {
-                    Provider::OpenAI => "gpt-4-turbo",
-                    Provider::Anthropic => "claude-3-opus-20240229",
-                    Provider::Gemini => "gemini-1.5-pro",
-                    Provider::Groq => "llama3-70b-8192",
-                    Provider::Bedrock => "anthropic.claude-3-haiku-20240307-v1:0",
-                };
+                let default_model = get_default_model(provider);
                 RT.block_on(fetch_data_with_provider(&messages, provider, default_model))
             } else {
                 // Default to OpenAI if provider can't be parsed
@@ -162,14 +166,7 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
             // Try to parse provider string to Provider enum
             if let Some(provider) = parse_provider(provider_str) {
                 // Use provider with default model
-                // Default models are defined in the client implementations
-                let default_model = match provider {
-                    Provider::OpenAI => "gpt-4-turbo",
-                    Provider::Anthropic => "claude-3-opus-20240229",
-                    Provider::Gemini => "gemini-1.5-pro",
-                    Provider::Groq => "llama3-70b-8192",
-                    Provider::Bedrock => "anthropic.claude-3-haiku-20240307-v1:0",
-                };
+                let default_model = get_default_model(provider);
                 RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, default_model))
             } else {
                 // Default to OpenAI if provider can't be parsed

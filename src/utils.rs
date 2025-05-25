@@ -1,69 +1,9 @@
 use polars::prelude::*;
-use std::error::Error;
-use std::fmt;
-use serde_json::{json, Value};
-use serde::{Deserialize, Serialize};
-use crate::model_client::{self, Provider, create_client, Message};
+use serde_json::json;
+use crate::model_client::{self, Provider, create_client, Message, ModelClientError};
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ChatCompletion {
-    id: String,
-    object: String,
-    created: i64,
-    model: String,
-    choices: Vec<Choice>,
-    usage: Usage,
-    system_fingerprint: Option<String>,
-    service_tier: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Choice {
-    index: i32,
-    message: ChatMessage,
-    logprobs: Option<Value>,
-    finish_reason: String,
-}
-
-// Maintain a separate ChatMessage struct for API responses
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ChatMessage {
-    role: String,
-    content: String,
-    refusal: Option<Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Usage {
-    prompt_tokens: i32,
-    completion_tokens: i32,
-    total_tokens: i32,
-    #[serde(default)]
-    prompt_tokens_details: Option<Value>,
-    #[serde(default)]
-    completion_tokens_details: Option<Value>,
-}
-
-#[derive(Debug)]
-pub enum FetchError {
-    Http(u16, String), // Status code and error message
-    Serialization(serde_json::Error), // JSON parsing error
-    // Reqwest(reqwest::Error), // May be needed in future
-    ReadBody(std::io::Error), // Changed from ureq::Error to std::io::Error
-}
-
-impl fmt::Display for FetchError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match *self {
-            FetchError::Http(code, ref message) => write!(f, "HTTP Error {}: {}", code, message),
-            FetchError::Serialization(ref err) => write!(f, "Serialization Error: {}", err),
-            FetchError::ReadBody(ref err) => write!(f, "Error reading body: {}", err),
-            // FetchError::Reqwest(ref err) => write!(f, "Request Error: {}", err),
-        }
-    }
-}
-
-impl Error for FetchError {}
+// Remove duplicate error type - use ModelClientError from model_client instead
+pub type FetchError = ModelClientError;
 
 // This function is useful for writing functions which
 // accept pairs of List columns. Delete if unneded.
@@ -85,22 +25,6 @@ where
             _ => None,
         })
         .collect_ca(ca.name().clone())
-}
-
-// Parse OpenAI API response to extract message content
-fn parse_openai_response(response_text: &str) -> Result<String, FetchError> {
-    match serde_json::from_str::<ChatCompletion>(response_text) {
-        Ok(completion) => {
-            if let Some(choice) = completion.choices.first() {
-                Ok(choice.message.content.clone())
-            } else {
-                Ok("No response content".to_string())
-            }
-        },
-        Err(err) => {
-            Err(FetchError::Serialization(err))
-        }
-    }
 }
 
 pub async fn fetch_data(messages: &[String]) -> Vec<Option<String>> {
@@ -143,6 +67,7 @@ pub fn parse_message_json(json_str: &str) -> Result<Vec<Message>, serde_json::Er
     serde_json::from_str(json_str)
 }
 
+// Simplified sync function that uses the model_client error types
 pub fn fetch_api_response_sync(msg: &str, model: &str) -> Result<String, FetchError> {
     let agent = ureq::agent();
     let body = json!({
@@ -151,15 +76,38 @@ pub fn fetch_api_response_sync(msg: &str, model: &str) -> Result<String, FetchEr
     }).to_string();
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "".to_string());
     let auth = format!("Bearer {}", api_key);
+    
     let response = agent.post("https://api.openai.com/v1/chat/completions")
         .set("Authorization", auth.as_str())
         .set("Content-Type", "application/json")
         .send_string(&body);
 
+    let status = response.status();
     if response.ok() {
-        let response_text = response.into_string().map_err(FetchError::ReadBody)?;
+        let response_text = response.into_string()
+            .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {}", e)))?;
         parse_openai_response(&response_text)
     } else {
-        Err(FetchError::Http(response.status(), response.into_string().unwrap_or_else(|_| "Unknown error".to_string())))
+        let error_text = response.into_string()
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        Err(ModelClientError::Http(status, error_text))
     }
+}
+
+// Simplified OpenAI response parsing using model_client error types
+fn parse_openai_response(response_text: &str) -> Result<String, ModelClientError> {
+    // Use a simple JSON parsing approach since we only need the content
+    let json: serde_json::Value = serde_json::from_str(response_text)?;
+    
+    if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
+        if let Some(first_choice) = choices.first() {
+            if let Some(message) = first_choice.get("message") {
+                if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
+                    return Ok(content.to_string());
+                }
+            }
+        }
+    }
+    
+    Err(ModelClientError::ParseError("No response content found".to_string()))
 }
