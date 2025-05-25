@@ -86,6 +86,7 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
                     Provider::Anthropic => "claude-3-opus-20240229",
                     Provider::Gemini => "gemini-1.5-pro",
                     Provider::Groq => "llama3-70b-8192",
+                    Provider::Bedrock => "anthropic.claude-3-haiku-20240307-v1:0",
                 };
                 RT.block_on(fetch_data_with_provider(&messages, provider, default_model))
             } else {
@@ -141,10 +142,7 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
         .into_iter()
         .filter_map(|opt| opt.map(|s| {
             // Parse the JSON string into a vector of Messages
-            match crate::utils::parse_message_json(s) {
-                Ok(messages) => messages,
-                Err(_) => vec![] // Empty vec for errors
-            }
+            crate::utils::parse_message_json(s).unwrap_or_default()
         }))
         .collect();
     
@@ -170,6 +168,7 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
                     Provider::Anthropic => "claude-3-opus-20240229",
                     Provider::Gemini => "gemini-1.5-pro",
                     Provider::Groq => "llama3-70b-8192",
+                    Provider::Bedrock => "anthropic.claude-3-haiku-20240307-v1:0",
                 };
                 RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, default_model))
             } else {
@@ -227,7 +226,7 @@ fn combine_messages(inputs: &[Series]) -> PolarsResult<Series> {
                 
                 // Add comma if not the first message
                 if !first {
-                    combined_messages.push_str(",");
+                    combined_messages.push(',');
                 }
                 
                 // Determine if this is a single message or an array of messages
@@ -265,7 +264,7 @@ fn combine_messages(inputs: &[Series]) -> PolarsResult<Series> {
         }
         
         // Close the array
-        combined_messages.push_str("]");
+        combined_messages.push(']');
         
         // Add to results
         result_values.push(Some(combined_messages));

@@ -32,6 +32,9 @@ impl PyProvider {
     #[classattr]
     const GROQ: Self = PyProvider(Provider::Groq);
     
+    #[classattr]
+    const BEDROCK: Self = PyProvider(Provider::Bedrock);
+    
     #[new]
     fn new(provider_str: &str) -> PyResult<Self> {
         match Provider::from_str(provider_str) {

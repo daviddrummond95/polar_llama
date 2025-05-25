@@ -32,6 +32,7 @@ except ImportError:
             ANTHROPIC = "anthropic"
             GEMINI = "gemini"
             GROQ = "groq"
+            BEDROCK = "bedrock"
             
             def __init__(self, provider_str):
                 self.value = provider_str
@@ -61,7 +62,7 @@ def inference_async(
     expr : polars.Expr
         The text expression to use for inference
     provider : str or Provider, optional
-        The provider to use (OpenAI, Anthropic, Gemini, Groq)
+        The provider to use (OpenAI, Anthropic, Gemini, Groq, Bedrock)
     model : str, optional
         The model name to use
         
@@ -104,7 +105,7 @@ def inference(
     expr : polars.Expr
         The text expression to use for inference
     provider : str or Provider, optional
-        The provider to use (OpenAI, Anthropic, Gemini, Groq)
+        The provider to use (OpenAI, Anthropic, Gemini, Groq, Bedrock)
     model : str, optional
         The model name to use
         
@@ -150,7 +151,7 @@ def inference_messages(
     expr : polars.Expr
         The expression containing JSON message arrays
     provider : str or Provider, optional
-        The provider to use (OpenAI, Anthropic, Gemini, Groq)
+        The provider to use (OpenAI, Anthropic, Gemini, Groq, Bedrock)
     model : str, optional
         The model name to use
         

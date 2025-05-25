@@ -2,6 +2,7 @@ pub mod openai;
 pub mod anthropic;
 pub mod gemini;
 pub mod groq;
+pub mod bedrock;
 
 use reqwest::Client;
 use std::error::Error;
@@ -24,6 +25,7 @@ pub enum Provider {
     Anthropic,
     Gemini,
     Groq,
+    Bedrock,
 }
 
 impl Provider {
@@ -33,6 +35,7 @@ impl Provider {
             Provider::Anthropic => "anthropic",
             Provider::Gemini => "gemini",
             Provider::Groq => "groq",
+            Provider::Bedrock => "bedrock",
         }
     }
 }
@@ -47,6 +50,7 @@ impl FromStr for Provider {
             "anthropic" => Ok(Provider::Anthropic),
             "gemini" => Ok(Provider::Gemini),
             "groq" => Ok(Provider::Groq),
+            "bedrock" => Ok(Provider::Bedrock),
             _ => Err(format!("Unknown provider: {}", s)),
         }
     }
@@ -145,6 +149,7 @@ pub trait ModelClient {
             Provider::Anthropic => std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
             Provider::Gemini => std::env::var("GEMINI_API_KEY").unwrap_or_default(), 
             Provider::Groq => std::env::var("GROQ_API_KEY").unwrap_or_default(),
+            Provider::Bedrock => String::new(), // Bedrock uses AWS credentials
         }
     }
 }
@@ -156,6 +161,7 @@ pub fn create_client(provider: Provider, model: &str) -> Box<dyn ModelClient + S
         Provider::Anthropic => Box::new(anthropic::AnthropicClient::new_with_model(model)),
         Provider::Gemini => Box::new(gemini::GeminiClient::new_with_model(model)),
         Provider::Groq => Box::new(groq::GroqClient::new_with_model(model)),
+        Provider::Bedrock => Box::new(bedrock::BedrockClient::new_with_model(model)),
     }
 }
 
@@ -175,10 +181,7 @@ pub async fn fetch_data_generic<T: ModelClient + Sync + ?Sized>(
         let reqwest_client = &reqwest_client;
         
         async move {
-            match client.send_request(reqwest_client, &messages).await {
-                Ok(content) => Some(content),
-                Err(_) => None,
-            }
+            client.send_request(reqwest_client, &messages).await.ok()
         }
     }).collect::<Vec<_>>();
     
@@ -197,10 +200,7 @@ pub async fn fetch_data_generic_enhanced<T: ModelClient + Sync + ?Sized>(
         let reqwest_client = &reqwest_client;
         
         async move {
-            match client.send_request(reqwest_client, &messages).await {
-                Ok(content) => Some(content),
-                Err(_) => None,
-            }
+            client.send_request(reqwest_client, &messages).await.ok()
         }
     }).collect::<Vec<_>>();
     

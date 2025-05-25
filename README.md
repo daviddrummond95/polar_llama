@@ -12,7 +12,7 @@ Polar Llama is a Python library designed to enhance the efficiency of making par
 - **Integration with Polars**: Utilizes the Polars dataframe for organizing and handling requests, leveraging its efficient data processing capabilities.
 - **Easy to Use**: Simplifies the process of sending queries and retrieving responses from the ChatGPT API through a clean and straightforward interface.
 - **Multi-Message Support**: Create and process conversations with multiple messages in context, supporting complex multi-turn interactions.
-- **Multiple Provider Support**: Works with OpenAI, Anthropic, Gemini, and Groq models, giving you flexibility in your AI infrastructure.
+- **Multiple Provider Support**: Works with OpenAI, Anthropic, Gemini, Groq, and AWS Bedrock models, giving you flexibility in your AI infrastructure.
 
 #### Installation
 
@@ -99,6 +99,37 @@ df = df.with_columns(
 )
 ```
 
+#### AWS Bedrock Support
+
+Polar Llama now supports AWS Bedrock models. To use Bedrock, ensure you have AWS credentials configured (via AWS CLI, environment variables, or IAM roles):
+
+```python
+import polars as pl
+from polar_llama import string_to_message, inference_async
+import dotenv
+
+dotenv.load_dotenv()
+
+# Example questions
+questions = [
+    'What is the capital of France?',
+    'Explain quantum computing in simple terms.'
+]
+
+# Creating a dataframe with questions
+df = pl.DataFrame({'Questions': questions})
+
+# Adding prompts to the dataframe
+df = df.with_columns(
+    prompt=string_to_message("Questions", message_type='user')
+)
+
+# Using AWS Bedrock with Claude model
+df = df.with_columns(
+    answer=inference_async('prompt', provider='bedrock', model='anthropic.claude-3-haiku-20240307-v1:0')
+)
+```
+
 #### Benefits
 
 - **Speed**: Processes multiple queries in parallel, drastically reducing the time required for bulk query handling.
@@ -118,6 +149,6 @@ Polar Llama is released under the MIT license. For more details, see the LICENSE
 #### Roadmap
 
 - [x] **Multi-Message Support**: Support for multi-message conversations to maintain context.
-- [x] **Multiple Provider Support**: Support for different LLM providers (OpenAI, Anthropic, Gemini, Groq).
+- [x] **Multiple Provider Support**: Support for different LLM providers (OpenAI, Anthropic, Gemini, Groq, AWS Bedrock).
 - [ ] **Function Calling**: Add support for using the function calls and structured data outputs for inference requests.
 - [ ] **Streaming Responses**: Support for streaming responses from LLM providers.
