@@ -81,18 +81,43 @@ impl ModelClient for GeminiClient {
     }
     
     fn format_messages(&self, messages: &[Message]) -> Value {
-        json!(
-            messages.iter().map(|msg| {
-                json!({
-                    "role": if msg.role == "user" { "user" } else { "model" },
-                    "parts": [
-                        {
-                            "text": msg.content
-                        }
-                    ]
-                })
-            }).collect::<Vec<_>>()
-        )
+        // Check if we need to handle system message specially
+        let system_message = messages.iter().find(|msg| msg.role == "system");
+        
+        // Create formatted messages array
+        let mut formatted_messages = Vec::new();
+        
+        // If system message exists, add it first with special handling
+        if let Some(system) = system_message {
+            formatted_messages.push(json!({
+                "role": "user",
+                "parts": [
+                    {
+                        "text": format!("System instruction: {}", system.content)
+                    }
+                ]
+            }));
+        }
+        
+        // Add remaining non-system messages
+        for msg in messages.iter().filter(|msg| msg.role != "system") {
+            let role = match msg.role.as_str() {
+                "user" => "user",
+                "assistant" => "model", // Gemini uses "model" for assistant messages
+                _ => "user", // Default to user for unknown roles
+            };
+            
+            formatted_messages.push(json!({
+                "role": role,
+                "parts": [
+                    {
+                        "text": msg.content
+                    }
+                ]
+            }));
+        }
+        
+        json!(formatted_messages)
     }
     
     fn format_request_body(&self, messages: &[Message]) -> Value {

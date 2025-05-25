@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use async_trait::async_trait;
 use super::{ModelClient, ModelClientError, Message, Provider};
 use serde::Deserialize;
+use reqwest::Client;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -84,14 +85,34 @@ impl ModelClient for OpenAIClient {
     }
     
     fn format_messages(&self, messages: &[Message]) -> Value {
-        json!(
-            messages.iter().map(|msg| {
-                json!({
-                    "role": msg.role,
-                    "content": msg.content
-                })
-            }).collect::<Vec<_>>()
-        )
+        // OpenAI supports standard system, user, and assistant roles
+        let formatted_messages = messages.iter().map(|msg| {
+            let role = match msg.role.as_str() {
+                "system" => "system",
+                "user" => "user",
+                "assistant" => "assistant",
+                "function" => "function", // Support function role for function calling
+                // Default unknown roles to user
+                _ => "user",
+            };
+            
+            json!({
+                "role": role,
+                "content": msg.content
+            })
+        }).collect::<Vec<_>>();
+        
+        json!(formatted_messages)
+    }
+    
+    fn format_request_body(&self, messages: &[Message]) -> Value {
+        // Default OpenAI request parameters
+        json!({
+            "model": self.model_name(),
+            "messages": self.format_messages(messages),
+            "temperature": 0.7,
+            "max_tokens": 1024
+        })
     }
     
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {
@@ -106,6 +127,27 @@ impl ModelClient for OpenAIClient {
             Err(err) => {
                 Err(ModelClientError::Serialization(err))
             }
+        }
+    }
+    
+    async fn send_request(&self, client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
+        let api_key = self.get_api_key();
+        let body = serde_json::to_string(&self.format_request_body(messages))?;
+        
+        let response = client.post(self.api_endpoint())
+            .bearer_auth(api_key)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+            
+        let status = response.status();
+        let text = response.text().await?;
+        
+        if status.is_success() {
+            self.parse_response(&text)
+        } else {
+            Err(ModelClientError::Http(status.as_u16(), text))
         }
     }
 } 

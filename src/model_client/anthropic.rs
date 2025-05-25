@@ -66,22 +66,63 @@ impl ModelClient for AnthropicClient {
     }
     
     fn format_messages(&self, messages: &[Message]) -> Value {
-        json!(
-            messages.iter().map(|msg| {
-                json!({
-                    "role": if msg.role == "user" { "user" } else { "assistant" },
-                    "content": msg.content
-                })
-            }).collect::<Vec<_>>()
-        )
+        // Anthropic doesn't support system messages directly in the messages array
+        // We need to find a system message and extract it for the system parameter
+        let mut system_prompt = None;
+        let mut formatted_messages = Vec::new();
+        
+        for msg in messages {
+            match msg.role.as_str() {
+                "system" => {
+                    // Store the first system message encountered 
+                    if system_prompt.is_none() {
+                        system_prompt = Some(msg.content.clone());
+                    }
+                    // Don't add system messages to the regular messages array
+                },
+                "user" | "assistant" => {
+                    // Add user and assistant messages to the messages array
+                    formatted_messages.push(json!({
+                        "role": msg.role,
+                        "content": msg.content
+                    }));
+                },
+                _ => {
+                    // Default other roles to user
+                    formatted_messages.push(json!({
+                        "role": "user",
+                        "content": msg.content
+                    }));
+                }
+            }
+        }
+        
+        // Return the array of messages, system message is handled separately in format_request_body
+        json!(formatted_messages)
     }
     
     fn format_request_body(&self, messages: &[Message]) -> Value {
-        json!({
+        // Extract system message if present
+        let system = messages.iter()
+            .find(|msg| msg.role == "system")
+            .map(|msg| msg.content.clone());
+        
+        // Format messages (excluding system)
+        let formatted_messages = self.format_messages(messages);
+        
+        // Build request with or without system parameter
+        let mut request = json!({
             "model": self.model_name(),
-            "messages": self.format_messages(messages),
+            "messages": formatted_messages,
             "max_tokens": 1024
-        })
+        });
+        
+        // Add system parameter if we found a system message
+        if let Some(system_content) = system {
+            request["system"] = json!(system_content);
+        }
+        
+        request
     }
     
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {

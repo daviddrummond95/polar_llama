@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use futures;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Provider {
     OpenAI,
@@ -77,11 +83,6 @@ impl From<serde_json::Error> for ModelClientError {
     fn from(err: serde_json::Error) -> Self {
         ModelClientError::Serialization(err)
     }
-}
-
-pub struct Message {
-    pub role: String,
-    pub content: String,
 }
 
 #[async_trait]
@@ -184,6 +185,28 @@ pub async fn fetch_data_generic<T: ModelClient + Sync + ?Sized>(
     futures::future::join_all(fetch_tasks).await
 }
 
+/// Enhanced function to fetch data that supports either single messages or arrays of messages
+pub async fn fetch_data_generic_enhanced<T: ModelClient + Sync + ?Sized>(
+    client: &T,
+    message_arrays: &[Vec<Message>]
+) -> Vec<Option<String>> {
+    let reqwest_client = Client::new();
+    
+    let fetch_tasks = message_arrays.iter().map(|messages| {
+        let messages = messages.clone();
+        let reqwest_client = &reqwest_client;
+        
+        async move {
+            match client.send_request(reqwest_client, &messages).await {
+                Ok(content) => Some(content),
+                Err(_) => None,
+            }
+        }
+    }).collect::<Vec<_>>();
+    
+    futures::future::join_all(fetch_tasks).await
+}
+
 /// Example function showing how to use the different model clients with specific models
 pub async fn example_usage(messages: &[String], provider_str: &str, model: &str) -> Vec<Option<String>> {
     // Parse provider string to Provider enum
@@ -194,4 +217,20 @@ pub async fn example_usage(messages: &[String], provider_str: &str, model: &str)
     
     // Use client with generic fetch function
     fetch_data_generic(&*client, messages).await
+}
+
+/// Enhanced example function supporting message arrays
+pub async fn example_usage_enhanced(
+    message_arrays: &[Vec<Message>], 
+    provider_str: &str, 
+    model: &str
+) -> Vec<Option<String>> {
+    // Parse provider string to Provider enum
+    let provider = Provider::from_str(provider_str).unwrap_or(Provider::OpenAI);
+    
+    // Create appropriate client with specified model
+    let client = create_client(provider, model);
+    
+    // Use client with enhanced generic fetch function
+    fetch_data_generic_enhanced(&*client, message_arrays).await
 } 

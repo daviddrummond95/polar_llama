@@ -133,6 +133,75 @@ def inference(
         kwargs=kwargs,
     )
 
+def inference_messages(
+    expr: IntoExpr, 
+    *, 
+    provider: Optional[Union[str, Provider]] = None, 
+    model: Optional[str] = None
+) -> pl.Expr:
+    """
+    Process message arrays (conversations) for inference using LLMs.
+    
+    This function accepts properly formatted JSON message arrays and sends them
+    to the LLM for inference while preserving conversation context.
+    
+    Parameters
+    ----------
+    expr : polars.Expr
+        The expression containing JSON message arrays
+    provider : str or Provider, optional
+        The provider to use (OpenAI, Anthropic, Gemini, Groq)
+    model : str, optional
+        The model name to use
+        
+    Returns
+    -------
+    polars.Expr
+        Expression with inferred completions
+    """
+    import inspect
+    print(f"Type of provider: {type(provider)}")
+    if provider is not None:
+        print(f"Provider value: {provider}")
+        print(f"Provider attributes: {inspect.getmembers(provider)}")
+    
+    expr = parse_into_expr(expr)
+    kwargs = {}
+    
+    if provider is not None:
+        # Convert Provider to string to make it picklable
+        if hasattr(provider, 'as_str'):
+            provider_str = provider.as_str()
+        elif hasattr(provider, '__str__'):
+            provider_str = str(provider)
+        else:
+            provider_str = provider
+        
+        print(f"Provider string: {provider_str}")
+        kwargs["provider"] = provider_str
+        
+    if model is not None:
+        kwargs["model"] = model
+    
+    print(f"Final kwargs: {kwargs}")
+    
+    # Don't pass empty kwargs dictionary    
+    if not kwargs:
+        return register_plugin(
+            args=[expr],
+            symbol="inference_messages",
+            is_elementwise=True,
+            lib=lib,
+        )
+    
+    return register_plugin(
+        args=[expr],
+        symbol="inference_messages",
+        is_elementwise=True,
+        lib=lib,
+        kwargs=kwargs,
+    )
+
 def string_to_message(expr: IntoExpr, *, message_type: str) -> pl.Expr:
     """
     Convert a string to a message with the specified type.
@@ -156,4 +225,30 @@ def string_to_message(expr: IntoExpr, *, message_type: str) -> pl.Expr:
         is_elementwise=True,
         lib=lib,
         kwargs={"message_type": message_type},
+    )
+
+def combine_messages(*exprs: IntoExpr) -> pl.Expr:
+    """
+    Combine multiple message expressions into a single message array.
+    
+    This function takes multiple message expressions (strings containing JSON formatted messages)
+    and combines them into a single JSON array of messages, preserving the order.
+    
+    Parameters
+    ----------
+    *exprs : polars.Expr
+        One or more expressions containing messages to combine
+        
+    Returns
+    -------
+    polars.Expr
+        Expression with combined message arrays
+    """
+    args = [parse_into_expr(expr) for expr in exprs]
+    
+    return register_plugin(
+        args=args,
+        symbol="combine_messages",
+        is_elementwise=True,
+        lib=lib,
     )

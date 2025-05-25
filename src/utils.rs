@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 use serde_json::{json, Value};
 use serde::{Deserialize, Serialize};
-use crate::model_client::{self, Provider, create_client};
+use crate::model_client::{self, Provider, create_client, Message};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ChatCompletion {
@@ -20,13 +20,14 @@ pub struct ChatCompletion {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Choice {
     index: i32,
-    message: Message,
+    message: ChatMessage,
     logprobs: Option<Value>,
     finish_reason: String,
 }
 
+// Maintain a separate ChatMessage struct for API responses
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Message {
+pub struct ChatMessage {
     role: String,
     content: String,
     refusal: Option<Value>,
@@ -102,8 +103,6 @@ fn parse_openai_response(response_text: &str) -> Result<String, FetchError> {
     }
 }
 
-// Initialize a global runtime for all async operations
-
 pub async fn fetch_data(messages: &[String]) -> Vec<Option<String>> {
     // Default to OpenAI with gpt-4-turbo
     let client = create_client(Provider::OpenAI, "gpt-4-turbo");
@@ -113,6 +112,35 @@ pub async fn fetch_data(messages: &[String]) -> Vec<Option<String>> {
 pub async fn fetch_data_with_provider(messages: &[String], provider: Provider, model: &str) -> Vec<Option<String>> {
     let client = create_client(provider, model);
     model_client::fetch_data_generic(&*client, messages).await
+}
+
+// New function to support message arrays with OpenAI default
+pub async fn fetch_data_message_arrays(message_arrays: &[Vec<Message>]) -> Vec<Option<String>> {
+    // Default to OpenAI with gpt-4-turbo
+    let client = create_client(Provider::OpenAI, "gpt-4-turbo");
+    model_client::fetch_data_generic_enhanced(&*client, message_arrays).await
+}
+
+// New function to support message arrays with specific provider
+pub async fn fetch_data_message_arrays_with_provider(
+    message_arrays: &[Vec<Message>], 
+    provider: Provider, 
+    model: &str
+) -> Vec<Option<String>> {
+    let client = create_client(provider, model);
+    model_client::fetch_data_generic_enhanced(&*client, message_arrays).await
+}
+
+// Function to parse a string as a JSON array of messages
+pub fn parse_message_json(json_str: &str) -> Result<Vec<Message>, serde_json::Error> {
+    // Try parsing as a single message first
+    let single_message: Result<Message, serde_json::Error> = serde_json::from_str(json_str);
+    if let Ok(message) = single_message {
+        return Ok(vec![message]);
+    }
+    
+    // If that fails, try parsing as an array of messages
+    serde_json::from_str(json_str)
 }
 
 pub fn fetch_api_response_sync(msg: &str, model: &str) -> Result<String, FetchError> {
