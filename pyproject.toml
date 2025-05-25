@@ -5,9 +5,38 @@ build-backend = "maturin"
 [project]
 name = "polar-llama"
 dynamic = ["version"]
+description = "Parallel inference calls to LLM APIs using Polars dataframes"
+authors = [{name = "David Drummond", email = "daviddrummond95@gmail.com"}]
+readme = "README.md"
+homepage = "https://github.com/daviddrummond95/polar_llama"
+repository = "https://github.com/daviddrummond95/polar_llama"
+documentation = "https://github.com/daviddrummond95/polar_llama#readme"
+keywords = ["llm", "polars", "parallel", "inference", "ai", "openai", "anthropic", "gemini", "groq", "bedrock", "chatgpt", "dataframe"]
+license = {text = "MIT"}
 requires-python = ">=3.8"
 classifiers = [
-  "Programming Language :: Rust",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Database",
+  "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+  "Typing :: Typed",
 ]
+
+[project.urls]
+"Bug Reports" = "https://github.com/daviddrummond95/polar_llama/issues"
+"Source" = "https://github.com/daviddrummond95/polar_llama"
+"Documentation" = "https://github.com/daviddrummond95/polar_llama#readme"
