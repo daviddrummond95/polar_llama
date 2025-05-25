@@ -55,51 +55,69 @@ jobs:
       - name: Build and install package
         run: |
           source .venv/bin/activate
-          maturin build --release
-          pip install target/wheels/*.whl
+          maturin develop --release
       
-      # Run package inspection tests
-      - name: Debug Package Contents
+      # Debug: Check the installed package structure
+      - name: Debug Package Installation
         run: |
           source .venv/bin/activate
-          # Run with -v for verbose output
-          python -m pytest tests/test_imports.py -v
-          python -m pytest tests/test_provider.py -v
-      
-      # Check the installed package
-      - name: Show Installed Package
-        run: |
-          source .venv/bin/activate
+          echo "=== Package installation check ==="
           pip show polar-llama
-          pip list
-          ls -la .venv/lib/python*/site-packages/polar_llama/
-          
-          # Print the __init__.py file contents
-          echo "Contents of __init__.py:"
-          cat .venv/lib/python*/site-packages/polar_llama/__init__.py | head -n 50
-          
-          # Check Rust extension
-          echo "Checking Rust extension module:"
-          ls -la .venv/lib/python*/site-packages/polar_llama/polar_llama*
-          
-          # Try to inspect the extension module
+          echo ""
+          echo "=== Python site-packages contents ==="
           python -c "
-          import sys
-          sys.path.append('.venv/lib/python*/site-packages/')
-          try:
-              from polar_llama import Provider
-              print('Provider enum available:', Provider is not None)
-              print('Provider dir:', dir(Provider))
-          except ImportError as e:
-              print('Import error for Provider:', e)
-          except Exception as e:
-              print('Unexpected error:', e)
+          import site
+          import os
+          for path in site.getsitepackages():
+              polar_path = os.path.join(path, 'polar_llama')
+              if os.path.exists(polar_path):
+                  print(f'Found polar_llama at: {polar_path}')
+                  for item in os.listdir(polar_path):
+                      print(f'  - {item}')
           "
+          echo ""
+          echo "=== Test basic import ==="
+          python -c "
+          try:
+              import polar_llama
+              print('✓ polar_llama imported successfully')
+              print(f'polar_llama location: {polar_llama.__file__}')
+              
+              from polar_llama import Provider
+              print('✓ Provider imported successfully')
+              print(f'Provider.OPENAI: {Provider.OPENAI}')
+              
+          except Exception as e:
+              print(f'✗ Import failed: {e}')
+              import traceback
+              traceback.print_exc()
+          "
+      
+      # Run tests from a different directory to ensure we're testing the installed package
+      - name: Run Tests
+        run: |
+          source .venv/bin/activate
+          # Set dummy API keys to prevent errors in tests that might still use dotenv
+          export OPENAI_API_KEY="dummy_key"
+          export ANTHROPIC_API_KEY="dummy_key"
+          export GROQ_API_KEY="dummy_key"
+          export GEMINI_API_KEY="dummy_key"
+          
+          # Create a temporary directory and run tests from there
+          mkdir -p /tmp/test_run
+          cd /tmp/test_run
+          
+          # Copy test files to temp directory
+          cp -r $GITHUB_WORKSPACE/tests .
+          
+          # Run tests
+          python -m pytest tests -v --tb=short
       
       # Run pre-commit checks
       - name: Run pre-commit checks
         run: |
           source .venv/bin/activate
+          cd $GITHUB_WORKSPACE
           cargo fmt --all && cargo clippy --all-features
           python -m ruff check . --fix || true
           if [ -d "polar_llama" ]; then
@@ -115,17 +133,6 @@ jobs:
           elif [ -d "tests" ]; then
             python -m mypy --ignore-missing-imports tests || true
           fi
-      
-      # Run all tests
-      - name: Run All Tests
-        run: |
-          source .venv/bin/activate
-          # Set dummy API keys to prevent errors in tests that might still use dotenv
-          export OPENAI_API_KEY="dummy_key"
-          export ANTHROPIC_API_KEY="dummy_key"
-          export GROQ_API_KEY="dummy_key"
-          export GEMINI_API_KEY="dummy_key"
-          python -m pytest tests -v
       
   linux:
     runs-on: ubuntu-latest

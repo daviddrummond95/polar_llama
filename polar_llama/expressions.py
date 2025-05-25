@@ -25,27 +25,33 @@ def get_lib_path():
     
     if potential_libs:
         # Return the first one found
-        return str(potential_libs[0])
+        lib_path = str(potential_libs[0])
+        print(f"Found library at: {lib_path}")
+        return lib_path
     else:
         # As a fallback, guess the name based on the module name
         if os.name == 'posix':
-            return str(lib_dir / "polar_llama.so")
+            fallback_path = str(lib_dir / "polar_llama.so")
         else:
-            return str(lib_dir / "polar_llama.pyd")
+            fallback_path = str(lib_dir / "polar_llama.pyd")
+        print(f"No library found, using fallback: {fallback_path}")
+        return fallback_path
 
 def ensure_expressions_registered():
     """Ensure all expressions are registered with Polars."""
     # This is mainly for debugging
-    print(f"Using library at: {get_lib_path()}")
+    lib_path = get_lib_path()
+    print(f"Using library at: {lib_path}")
     
-    # Check that the expressions are available
-    expressions = ["inference", "inference_async", "string_to_message"]
-    for expr in expressions:
-        try:
-            # Try to directly access the expression via the plugin registry
-            registered = hasattr(pl.plugin_registry, expr)
-            print(f"Expression {expr} registered: {registered}")
-        except Exception as e:
-            print(f"Error checking expression {expr}: {e}")
+    # Check if the library file actually exists
+    if os.path.exists(lib_path):
+        print(f"✓ Library file exists: {lib_path}")
+    else:
+        print(f"✗ Library file not found: {lib_path}")
+        # List what files are actually in the directory
+        lib_dir = Path(lib_path).parent
+        print(f"Files in {lib_dir}:")
+        for file in lib_dir.iterdir():
+            print(f"  - {file.name}")
     
     return True 
