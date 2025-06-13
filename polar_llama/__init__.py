@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import polars as pl
 
+import json
+
 from polar_llama.utils import parse_into_expr, register_plugin, parse_version
 
 if TYPE_CHECKING:
@@ -160,12 +162,6 @@ def inference_messages(
     polars.Expr
         Expression with inferred completions
     """
-    import inspect
-    print(f"Type of provider: {type(provider)}")
-    if provider is not None:
-        print(f"Provider value: {provider}")
-        print(f"Provider attributes: {inspect.getmembers(provider)}")
-    
     expr = parse_into_expr(expr)
     kwargs = {}
     
@@ -173,20 +169,15 @@ def inference_messages(
         # Convert Provider to string to make it picklable
         if hasattr(provider, 'as_str'):
             provider_str = provider.as_str()
-        elif hasattr(provider, '__str__'):
-            provider_str = str(provider)
         else:
-            provider_str = provider
-        
-        print(f"Provider string: {provider_str}")
+            provider_str = str(provider)
+
         kwargs["provider"] = provider_str
         
     if model is not None:
         kwargs["model"] = model
     
-    print(f"Final kwargs: {kwargs}")
-    
-    # Don't pass empty kwargs dictionary    
+    # Don't pass empty kwargs dictionary
     if not kwargs:
         return register_plugin(
             args=[expr],
@@ -220,13 +211,20 @@ def string_to_message(expr: IntoExpr, *, message_type: str) -> pl.Expr:
         Expression with formatted messages
     """
     expr = parse_into_expr(expr)
-    return register_plugin(
-        args=[expr],
-        symbol="string_to_message",
-        is_elementwise=True,
-        lib=lib,
-        kwargs={"message_type": message_type},
-    )
+    try:
+        return register_plugin(
+            args=[expr],
+            symbol="string_to_message",
+            is_elementwise=True,
+            lib=lib,
+            kwargs={"message_type": message_type},
+        )
+    except FileNotFoundError:
+        # Fallback Python implementation when the native library is missing
+        return expr.cast(pl.Utf8).map_elements(
+            lambda s: json.dumps({"role": message_type, "content": s}),
+            return_dtype=pl.String,
+        )
 
 def combine_messages(*exprs: IntoExpr) -> pl.Expr:
     """
@@ -245,11 +243,33 @@ def combine_messages(*exprs: IntoExpr) -> pl.Expr:
     polars.Expr
         Expression with combined message arrays
     """
-    args = [parse_into_expr(expr) for expr in exprs]
-    
-    return register_plugin(
-        args=args,
-        symbol="combine_messages",
-        is_elementwise=True,
-        lib=lib,
-    )
+    args = [parse_into_expr(expr).cast(pl.Utf8) for expr in exprs]
+
+    try:
+        return register_plugin(
+            args=args,
+            symbol="combine_messages",
+            is_elementwise=True,
+            lib=lib,
+        )
+    except FileNotFoundError:
+        struct_expr = pl.struct(args)
+
+        def _combine(row: dict) -> str:
+            messages = []
+            for val in row.values():
+                if val is None or val == "":
+                    continue
+                try:
+                    parsed = json.loads(val)
+                    if isinstance(parsed, list):
+                        messages.extend(parsed)
+                    elif isinstance(parsed, dict):
+                        messages.append(parsed)
+                    else:
+                        messages.append({"role": "user", "content": str(parsed)})
+                except Exception:
+                    messages.append({"role": "user", "content": val})
+            return json.dumps(messages)
+
+        return struct_expr.map_elements(_combine, return_dtype=pl.String)
