@@ -130,6 +130,40 @@ df = df.with_columns(
 )
 ```
 
+#### Provider Column Feature
+
+Polar Llama lets you pick the LLM provider (and even the model) *per row* by passing a regular Polars column expression to the `provider` (or `model`) parameter. This makes it trivial to route different prompts to different back-ends in a single call.
+
+```python
+import polars as pl
+from polar_llama import string_to_message, inference_async
+
+# A small demo dataset with different providers/models per row
+df = pl.DataFrame({
+    "prompt": [
+        "What is the capital of Spain?",
+        "Summarise the theory of general relativity."
+    ],
+    "provider": ["openai", "anthropic"],
+    "model": ["gpt-4o-mini", "claude-3-haiku-20240307-v1:0"],
+})
+
+# Convert the plain text prompt to a message expected by the LLM
+df = df.with_columns(
+    string_to_message(pl.col("prompt"), message_type="user").alias("message")
+)
+
+# Run inference – provider/model are selected from the current row
+# (no Python loops required!)
+df = df.with_columns(
+    inference_async(
+        pl.col("message"),
+        provider=pl.col("provider"),  # column expression 👈
+        model=pl.col("model"),        # column expression 👈
+    ).alias("response")
+)
+```
+
 #### Benefits
 
 - **Speed**: Processes multiple queries in parallel, drastically reducing the time required for bulk query handling.

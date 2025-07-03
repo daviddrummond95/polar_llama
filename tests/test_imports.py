@@ -1,6 +1,4 @@
 import polars as pl
-import inspect
-import sys
 import importlib.util
 import os
 import pytest

@@ -1,5 +1,3 @@
-import polars as pl
-
 def test_provider_enum():
     """Test if the Provider enum is accessible."""
     

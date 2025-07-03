@@ -2,7 +2,6 @@ import polars as pl
 from polar_llama import inference_async, string_to_message, Provider, inference_messages, combine_messages
 import os
 from time import time
-import numpy as np
 import dotenv
 
 dotenv.load_dotenv()

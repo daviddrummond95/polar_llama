@@ -1,7 +1,5 @@
 import polars as pl
 import pytest
-import importlib.util
-import sys
 
 # Try to import the required components with better error handling
 PROVIDER_AVAILABLE = False
