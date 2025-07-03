@@ -131,4 +131,27 @@ The example demonstrates:
 
 ---
 
+## 6 Monitoring & batching with MCP CLI
+
+If you installed the full MCP tool-chain you also have the `mcp` CLI at your
+fingertips:
+
+```bash
+# Dry-run your Polars plan – get a JSON summary of how MCP would split it
+mcp plan stats my_script.py:plan
+
+# Execute with live progress bar and capture metrics
+mcp run my_script.py:plan --progress --out responses.parquet
+```
+
+The CLI understands the same logical plan built in the examples above – you
+only need to expose it as a top-level variable (e.g. `plan` or `lazy_plan`) in
+your module. Optional flags:
+
+* `--batch-size` – override provider-specific batch sizing.
+* `--concurrency` – set the maximum number of parallel calls per provider.
+* `--openai.temperature` / `--groq.top_p` – pass provider specific kwargs.
+
+---
+
 Happy parallel prompting! 🚀
