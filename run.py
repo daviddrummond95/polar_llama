@@ -2,9 +2,14 @@ import polars as pl
 from polar_llama import inference_async, string_to_message, Provider, inference_messages, combine_messages
 import os
 from time import time
-import dotenv
-
-dotenv.load_dotenv()
+# Optional dependency
+try:
+    import dotenv  # type: ignore
+    dotenv.load_dotenv()
+except ModuleNotFoundError:
+    # Running in an environment without python-dotenv installed is fine –
+    # POLARS_VERBOSE or API keys can be provided by other means.
+    pass
 
 # Set the POLARS_VERBOSE environment variable
 os.environ['POLARS_VERBOSE'] = '1'
