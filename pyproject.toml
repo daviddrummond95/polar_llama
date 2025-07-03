@@ -47,7 +47,7 @@ optional-dependencies.dev = [
   "pytest",
   "ruff",
   "mypy",
-  "mcp-runtime",  # hypothetical MCP helper runtime
+  "polars-mcp-runtime",  # MCP helper runtime
 ]
 
 [project.urls]
