@@ -1,22 +1,22 @@
-import types, sys
-import polars as pl
+import sys
+import types
 
-# pyright: reportMissingImports=false
+# We only create a stub if the real package is missing.
 
-# Provide a lightweight stub so the test suite can import polars_mcp_runtime
-# even if the real package is not installed in CI.
-module = types.ModuleType("polars_mcp_runtime")
+try:
+    import polars_mcp_runtime  # type: ignore  # noqa: F401
+except ModuleNotFoundError:  # pragma: no cover – CI fallback
+    import polars as pl  # type: ignore
 
-def _submit_df(plan: pl.LazyFrame | pl.DataFrame):  # type: ignore[name-defined]
-    """Very small stand-in for the real MCP submit helper.
+    module = types.ModuleType("polars_mcp_runtime")
 
-    For unit-testing we just *collect* if the object is lazy, otherwise return
-    the DataFrame unchanged.  No network calls are made.
-    """
-    if hasattr(plan, "collect"):
-        return plan.collect()
-    return plan
+    def submit_df(plan):  # type: ignore[override]
+        """Collect lazy plans or return DataFrames unchanged (local stub)."""
 
-module.submit_df = _submit_df  # type: ignore[attr-defined]
+        if hasattr(plan, "collect"):
+            return plan.collect()
+        return plan
 
-sys.modules["polars_mcp_runtime"] = module
+    module.submit_df = submit_df  # type: ignore[attr-defined]
+
+    sys.modules["polars_mcp_runtime"] = module

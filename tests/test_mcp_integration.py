@@ -1,4 +1,17 @@
-# pyright: reportMissingImports=false
+try:
+    import polars as pl  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover – CI env should have polars
+    import types, sys
+
+    pl = types.ModuleType("polars")
+    sys.modules["polars"] = pl
+
+    # Minimal stubs used in the tests below
+    class _StubExpr:  # noqa: D401
+        """Placeholder for polars.Expr."""
+
+    pl.Expr = _StubExpr  # type: ignore[attr-defined]
+
 import polars as pl
 from polar_llama import string_to_message, inference_async, inference_messages
 
