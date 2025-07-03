@@ -74,4 +74,61 @@ print(result_df.collect())
 
 ---
 
+## 5 End-to-end conversation example (multi-message)
+
+Below we build a tiny multi-turn conversation dataset that mixes providers **per row** and lets MCP execute it in parallel.
+
+```python
+import polars as pl
+from polar_llama import (
+    string_to_message,
+    combine_messages,
+    inference_messages,
+)
+from polars_mcp_runtime import submit_df
+
+conversations = [
+    {
+        "system": "You are a helpful assistant.",
+        "user": "Explain quantum entanglement in two sentences.",
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+    },
+    {
+        "system": "You are a grumpy but accurate mathematician.",
+        "user": "What is the Riemann hypothesis?",
+        "provider": "gemini",
+        "model": "gemini-1.5-pro",
+    },
+]
+
+# Build the initial DataFrame
+lazy_conv = pl.DataFrame(conversations).lazy()
+
+# Step 1 – turn plain strings into messages
+lazy_conv = lazy_conv.with_columns(
+    string_to_message(pl.col("system"), message_type="system").alias("sys_msg"),
+    string_to_message(pl.col("user"), message_type="user").alias("user_msg"),
+)
+
+# Step 2 – bundle into a conversation and send to the model chosen *per row*
+plan = lazy_conv.with_columns(
+    inference_messages(
+        combine_messages(pl.col("sys_msg"), pl.col("user_msg")),
+        provider=pl.col("provider"),
+        model=pl.col("model"),
+    ).alias("assistant_response")
+)
+
+result = submit_df(plan)
+print(result.collect())
+```
+
+The example demonstrates:
+1. Multiple turns (system + user) → `combine_messages`.
+2. Per-row provider/model selection.
+3. A single `submit_df` call that MCP splits and fans-out behind the scenes.
+
+---
+
 Happy parallel prompting! 🚀

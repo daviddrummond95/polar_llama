@@ -1,6 +1,6 @@
 # pyright: reportMissingImports=false
 import polars as pl
-from polar_llama import string_to_message, inference_async
+from polar_llama import string_to_message, inference_async, inference_messages
 
 def test_provider_column_expression_builds():
     """Ensure that inference_async accepts column expressions for provider/model."""
@@ -35,3 +35,34 @@ def test_provider_column_expression_builds():
     # We don't collect/execute – that would hit the network. Just ensure the lazy
     # plan can be built without errors.
     assert "response" in df2.columns
+
+# Additional tests for other entry points
+
+def test_provider_column_inference_builds():
+    df = pl.DataFrame({
+        "prompt": ["hello"],
+        "provider": ["groq"],
+        "model": ["llama3-8b"],
+    })
+
+    expr = inference_async(
+        string_to_message(pl.col("prompt"), message_type="user"),
+        provider=pl.col("provider"),
+    )
+    # Should still be an expression
+    assert isinstance(expr, pl.Expr)
+
+
+def test_inference_messages_builds():
+    df = pl.DataFrame({
+        "conversation": [
+            "[{\"role\": \"user\", \"content\": \"Hi!\"}]",
+        ],
+        "provider": ["openai"],
+    })
+
+    expr = inference_messages(
+        pl.col("conversation"),
+        provider=pl.col("provider"),
+    )
+    assert isinstance(expr, pl.Expr)
