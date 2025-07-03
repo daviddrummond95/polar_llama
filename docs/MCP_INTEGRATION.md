@@ -9,7 +9,7 @@ This short guide shows how to combine **Polar Llama** with the *Model-Control-Pl
 ## 1 Prerequisites
 
 ```bash
-pip install polars polar-llama mcp-runtime   # fictitious MCP runtime package
+pip install polars polar-llama polars-mcp-runtime
 ```
 
 Make sure your environment variables / secrets for the individual LLM providers are set (e.g. `OPENAI_API_KEY`, `GROQ_API_KEY`, _etc._).
@@ -21,7 +21,7 @@ Make sure your environment variables / secrets for the individual LLM providers 
 ```python
 import polars as pl
 from polar_llama import string_to_message, inference_async
-from mcp_runtime import submit_df  # fictitious helper that executes Polars plans on MCP
+from polars_mcp_runtime import submit_df  # helper that executes Polars plans on MCP
 
 # A heterogeneous workload: every row can target a different provider/model
 workload = pl.DataFrame({

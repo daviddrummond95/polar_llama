@@ -6,3 +6,5 @@ mypy
 pandas
 pyarrow
 matplotlib
+python-dotenv
+mcp-runtime
