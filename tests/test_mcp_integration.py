@@ -1,16 +1,8 @@
-try:
-    import polars as pl  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover – CI env should have polars
-    import types, sys
+"""MCP integration tests for provider-column feature.
 
-    pl = types.ModuleType("polars")
-    sys.modules["polars"] = pl
-
-    # Minimal stubs used in the tests below
-    class _StubExpr:  # noqa: D401
-        """Placeholder for polars.Expr."""
-
-    pl.Expr = _StubExpr  # type: ignore[attr-defined]
+These tests are *offline*: they only verify that Polars logical plans can be
+built and accepted by the ``submit_df`` helper without making network calls.
+"""
 
 import polars as pl
 from polar_llama import string_to_message, inference_async, inference_messages

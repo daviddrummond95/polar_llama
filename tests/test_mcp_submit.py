@@ -1,5 +1,3 @@
-# pyright: reportMissingImports=false
-
 import polars as pl
 from polar_llama import string_to_message, combine_messages, inference_messages
 from polars_mcp_runtime import submit_df

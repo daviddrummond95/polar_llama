@@ -4,7 +4,7 @@ import os
 from time import time
 # Optional dependency
 try:
-    import dotenv  # type: ignore
+    import dotenv
     dotenv.load_dotenv()
 except ModuleNotFoundError:
     # Running in an environment without python-dotenv installed is fine –
