@@ -39,77 +39,108 @@ fn get_default_model(provider: Provider) -> &'static str {
 // This polars_expr annotation registers the function with Polars at build time
 #[polars_expr(output_type=String)]
 fn inference(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
-    let ca: &StringChunked = inputs[0].str()?;
-    
-    // Default model if not provided
-    let model = kwargs.model.unwrap_or_else(|| "gpt-4-turbo".to_string());
-    
-    let out = ca.apply(|opt_value| {
-        opt_value.map(|value| {
-            // If provider is specified, use fetch_api_response_with_provider
-            let response = match &kwargs.provider {
-                Some(provider_str) => {
-                    // Try to parse provider string to Provider enum
-                    if let Some(_provider) = parse_provider(provider_str) {
-                        // For now, we'll still use OpenAI since we don't have a sync version with provider
-                        fetch_api_response_sync(value, &model)
-                    } else {
-                        // Default to OpenAI if provider can't be parsed
-                        fetch_api_response_sync(value, &model)
-                    }
-                },
-                None => fetch_api_response_sync(value, &model),
-            };
-            Cow::Owned(response.unwrap_or_default())
+    // First input: prompt/messages column
+    let ca_prompt: &StringChunked = inputs[0].str()?;
+
+    // Optional second input: provider/tool selector column
+    let provider_ca: Option<&StringChunked> = if inputs.len() > 1 {
+        Some(inputs[1].str()?)
+    } else {
+        None
+    };
+
+    // Pre-compute model fallback (if supplied as kwarg)
+    let model_kwarg = kwargs.model.clone();
+
+    // Collect the results row-by-row
+    let out: StringChunked = ca_prompt
+        .into_iter()
+        .enumerate()
+        .map(|(idx, opt_prompt)| {
+            opt_prompt.and_then(|prompt| {
+                // Determine provider string for this row: priority -> column value -> kwarg
+                let provider_str_opt: Option<String> = provider_ca
+                    .and_then(|ca| ca.get(idx).map(|s| s.to_string()))
+                    .or_else(|| kwargs.provider.clone());
+
+                // Parse provider (fallback to OpenAI)
+                let provider_enum = provider_str_opt
+                    .as_deref()
+                    .and_then(parse_provider)
+                    .unwrap_or(Provider::OpenAI);
+
+                // Determine model: kwarg if provided else default for provider
+                let model_for_provider = model_kwarg.clone().unwrap_or_else(|| {
+                    get_default_model(provider_enum).to_string()
+                });
+
+                // NOTE: The synchronous path currently only supports OpenAI. We fall back to
+                // `fetch_api_response_sync` regardless of provider until a provider-agnostic
+                // sync implementation is available.
+                let response = fetch_api_response_sync(prompt, &model_for_provider).ok();
+
+                response
+            })
         })
-    });
+        .collect_ca(ca_prompt.name().clone());
+
     Ok(out.into_series())
 }
 
 // Register the asynchronous inference function with Polars
 #[polars_expr(output_type=String)]
 fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
-    let ca: &StringChunked = inputs[0].str()?;
-    let messages: Vec<String> = ca
-        .into_iter()
-        .filter_map(|opt| opt.map(|s| s.to_owned()))
-        .collect();
+    // First input: prompt column
+    let ca_prompt: &StringChunked = inputs[0].str()?;
 
-    // Get results based on provider and model
-    let results = match (&kwargs.provider, &kwargs.model) {
-        (Some(provider_str), Some(model)) => {
-            // Try to parse provider string to Provider enum
-            if let Some(provider) = parse_provider(provider_str) {
-                // Use provider and model
-                RT.block_on(fetch_data_with_provider(&messages, provider, model))
-            } else {
-                // Default to OpenAI if provider can't be parsed
-                RT.block_on(fetch_data_with_provider(&messages, Provider::OpenAI, model))
-            }
-        },
-        (Some(provider_str), None) => {
-            // Try to parse provider string to Provider enum
-            if let Some(provider) = parse_provider(provider_str) {
-                // Use provider with default model
-                let default_model = get_default_model(provider);
-                RT.block_on(fetch_data_with_provider(&messages, provider, default_model))
-            } else {
-                // Default to OpenAI if provider can't be parsed
-                RT.block_on(fetch_data(&messages))
-            }
-        },
-        (None, Some(model)) => {
-            // Use default provider (OpenAI) with specified model
-            RT.block_on(fetch_data_with_provider(&messages, Provider::OpenAI, model))
-        },
-        (None, None) => {
-            // Use default provider and model
-            RT.block_on(fetch_data(&messages))
-        },
+    // Optional second input: provider column
+    let provider_ca: Option<&StringChunked> = if inputs.len() > 1 {
+        Some(inputs[1].str()?)
+    } else {
+        None
     };
 
-    let string_refs: Vec<Option<String>> = results.into_iter().collect();
-    let out = StringChunked::from_iter_options(ca.name().clone(), string_refs.into_iter());
+    // Prepare a vector of futures, one per row
+    let mut tasks = Vec::with_capacity(ca_prompt.len());
+
+    for (idx, opt_prompt) in ca_prompt.into_iter().enumerate() {
+        if let Some(prompt) = opt_prompt {
+            // Determine provider string for this row
+            let provider_str_opt: Option<String> = provider_ca
+                .and_then(|ca| ca.get(idx).map(|s| s.to_string()))
+                .or_else(|| kwargs.provider.clone());
+
+            // Parse provider enum (fallback to OpenAI)
+            let provider_enum = provider_str_opt
+                .as_deref()
+                .and_then(parse_provider)
+                .unwrap_or(Provider::OpenAI);
+
+            // Determine model
+            let model_for_provider = if let Some(ref m) = kwargs.model {
+                m.clone()
+            } else {
+                get_default_model(provider_enum).to_string()
+            };
+
+            // Clone data to move into async task
+            let prompt_owned = prompt.to_owned();
+            let model_clone = model_for_provider.clone();
+
+            tasks.push(async move {
+                let msgs = vec![prompt_owned];
+                fetch_data_with_provider(&msgs, provider_enum, &model_clone).await.into_iter().next().unwrap_or(None)
+            });
+        } else {
+            // Push a task that immediately resolves to None to keep indexing
+            tasks.push(async { None });
+        }
+    }
+
+    // Execute all tasks concurrently on the global runtime
+    let results: Vec<Option<String>> = RT.block_on(async move { futures::future::join_all(tasks).await });
+
+    let out = StringChunked::from_iter_options(ca_prompt.name().clone(), results.into_iter());
 
     Ok(out.into_series())
 }
@@ -139,52 +170,63 @@ fn string_to_message(inputs: &[Series], kwargs: MessageKwargs) -> PolarsResult<S
 // New function to handle JSON arrays of messages
 #[polars_expr(output_type=String)]
 fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
-    let ca: &StringChunked = inputs[0].str()?;
-    
-    // Convert string inputs (JSON arrays) to vectors of messages
-    let message_arrays: Vec<Vec<Message>> = ca
-        .into_iter()
-        .filter_map(|opt| opt.map(|s| {
-            // Parse the JSON string into a vector of Messages
-            crate::utils::parse_message_json(s).unwrap_or_default()
-        }))
-        .collect();
-    
-    // Get results based on provider and model
-    let results = match (&kwargs.provider, &kwargs.model) {
-        (Some(provider_str), Some(model)) => {
-            // Try to parse provider string to Provider enum
-            if let Some(provider) = parse_provider(provider_str) {
-                // Use provider and model
-                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, model))
-            } else {
-                // Default to OpenAI if provider can't be parsed
-                RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
-            }
-        },
-        (Some(provider_str), None) => {
-            // Try to parse provider string to Provider enum
-            if let Some(provider) = parse_provider(provider_str) {
-                // Use provider with default model
-                let default_model = get_default_model(provider);
-                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, default_model))
-            } else {
-                // Default to OpenAI if provider can't be parsed
-                RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
-            }
-        },
-        (None, Some(model)) => {
-            // Use default provider (OpenAI) with specified model
-            RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, Provider::OpenAI, model))
-        },
-        (None, None) => {
-            // Use default provider and model
-            RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
-        },
+    // First input: JSON arrays of messages
+    let ca_messages: &StringChunked = inputs[0].str()?;
+
+    // Optional second input: provider column
+    let provider_ca: Option<&StringChunked> = if inputs.len() > 1 {
+        Some(inputs[1].str()?)
+    } else {
+        None
     };
 
-    let string_refs: Vec<Option<String>> = results.into_iter().collect();
-    let out = StringChunked::from_iter_options(ca.name().clone(), string_refs.into_iter());
+    // Build message arrays per row now because we will need them inside async tasks
+    let mut parsed_message_arrays: Vec<Vec<Message>> = Vec::with_capacity(ca_messages.len());
+    for opt in ca_messages.into_iter() {
+        let parsed = opt
+            .and_then(|s| crate::utils::parse_message_json(s).ok())
+            .unwrap_or_default();
+        parsed_message_arrays.push(parsed);
+    }
+
+    // Prepare async tasks per row
+    let mut tasks = Vec::with_capacity(parsed_message_arrays.len());
+
+    for (idx, messages) in parsed_message_arrays.into_iter().enumerate() {
+        if messages.is_empty() {
+            tasks.push(async { None });
+            continue;
+        }
+
+        // Determine provider string for this row
+        let provider_str_opt: Option<String> = provider_ca
+            .and_then(|ca| ca.get(idx).map(|s| s.to_string()))
+            .or_else(|| kwargs.provider.clone());
+
+        let provider_enum = provider_str_opt
+            .as_deref()
+            .and_then(parse_provider)
+            .unwrap_or(Provider::OpenAI);
+
+        let model_for_provider = if let Some(ref m) = kwargs.model {
+            m.clone()
+        } else {
+            get_default_model(provider_enum).to_string()
+        };
+
+        tasks.push(async move {
+            let message_arrays_ref = vec![messages];
+            crate::utils::fetch_data_message_arrays_with_provider(&message_arrays_ref, provider_enum, &model_for_provider)
+                .await
+                .into_iter()
+                .next()
+                .unwrap_or(None)
+        });
+    }
+
+    let results: Vec<Option<String>> = RT.block_on(async move { futures::future::join_all(tasks).await });
+
+    let out = StringChunked::from_iter_options(ca_messages.name().clone(), results.into_iter());
 
     Ok(out.into_series())
 }

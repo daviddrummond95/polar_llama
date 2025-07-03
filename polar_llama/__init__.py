@@ -71,24 +71,45 @@ def inference_async(
     polars.Expr
         Expression with inferred completions
     """
+    # Parse the primary expression (prompts/messages)
     expr = parse_into_expr(expr)
-    kwargs = {}
     
+    # Prepare the positional arguments list for the plugin call. We always include
+    # the mandatory `expr` argument. If the caller passes a *column expression*
+    # for `provider` (e.g. `pl.col("provider")`) we treat this as a **row-level**
+    # provider/tool selector and forward it as an additional positional
+    # argument so that the Rust implementation can access it via
+    # `inputs[1]`.
+    args = [expr]
+
+    # Collect keyword arguments that should be forwarded (i.e. constant values)
+    kwargs: dict[str, object] = {}
+
     if provider is not None:
-        # Convert Provider to string to make it picklable
-        if isinstance(provider, Provider):
-            provider = str(provider)
-        kwargs["provider"] = provider
-        
+        # If the provider is a Polars expression we forward it positionally so
+        # that it can vary per-row. Otherwise we treat it as a constant scalar
+        # and pass it as a kwarg (after converting an enum to its underlying
+        # string value so that it remains picklable).
+        if isinstance(provider, pl.Expr):
+            args.append(provider)
+        else:
+            if isinstance(provider, Provider):
+                provider = str(provider)
+            kwargs["provider"] = provider
+
     if model is not None:
         kwargs["model"] = model
-        
+
+    # When no kwargs were collected we pass None so that register_plugin
+    # doesn't attempt to serialise an empty dict (which Polars rejects).
+    final_kwargs = kwargs if kwargs else None
+
     return register_plugin(
-        args=[expr],
+        args=args,
         symbol="inference_async",
         is_elementwise=True,
         lib=lib,
-        kwargs=kwargs,
+        kwargs=final_kwargs,
     )
 
 def inference(
@@ -114,24 +135,36 @@ def inference(
     polars.Expr
         Expression with inferred completions
     """
+    # Parse the primary expression (prompts/messages)
     expr = parse_into_expr(expr)
-    kwargs = {}
-    
+
+    # Build positional arguments list starting with the prompt expression
+    args = [expr]
+
+    # Collect constant keyword arguments
+    kwargs: dict[str, object] = {}
+
     if provider is not None:
-        # Convert Provider to string to make it picklable
-        if isinstance(provider, Provider):
-            provider = str(provider)
-        kwargs["provider"] = provider
-        
+        if isinstance(provider, pl.Expr):
+            # Forward column expression positionally (per-row provider/tool)
+            args.append(provider)
+        else:
+            # Convert Provider enum to plain string for pickling
+            if isinstance(provider, Provider):
+                provider = str(provider)
+            kwargs["provider"] = provider
+
     if model is not None:
         kwargs["model"] = model
-        
+
+    final_kwargs = kwargs if kwargs else None
+
     return register_plugin(
-        args=[expr],
+        args=args,
         symbol="inference",
         is_elementwise=True,
         lib=lib,
-        kwargs=kwargs,
+        kwargs=final_kwargs,
     )
 
 def inference_messages(
@@ -160,47 +193,36 @@ def inference_messages(
     polars.Expr
         Expression with inferred completions
     """
-    import inspect
-    print(f"Type of provider: {type(provider)}")
-    if provider is not None:
-        print(f"Provider value: {provider}")
-        print(f"Provider attributes: {inspect.getmembers(provider)}")
-    
+    # Parse primary expression (JSON message arrays)
     expr = parse_into_expr(expr)
-    kwargs = {}
-    
+
+    args = [expr]
+
+    kwargs: dict[str, object] = {}
+
     if provider is not None:
-        # Convert Provider to string to make it picklable
-        if hasattr(provider, 'as_str'):
-            provider_str = provider.as_str()
-        elif hasattr(provider, '__str__'):
-            provider_str = str(provider)
+        # If provider is a Polars expression -> positional, else constant kwarg
+        if isinstance(provider, pl.Expr):
+            args.append(provider)
         else:
-            provider_str = provider
-        
-        print(f"Provider string: {provider_str}")
-        kwargs["provider"] = provider_str
-        
+            if hasattr(provider, 'as_str'):
+                provider = provider.as_str()
+            elif hasattr(provider, '__str__'):
+                provider = str(provider)
+
+            kwargs["provider"] = provider
+
     if model is not None:
         kwargs["model"] = model
-    
-    print(f"Final kwargs: {kwargs}")
-    
-    # Don't pass empty kwargs dictionary    
-    if not kwargs:
-        return register_plugin(
-            args=[expr],
-            symbol="inference_messages",
-            is_elementwise=True,
-            lib=lib,
-        )
-    
+
+    final_kwargs = kwargs if kwargs else None
+
     return register_plugin(
-        args=[expr],
+        args=args,
         symbol="inference_messages",
         is_elementwise=True,
         lib=lib,
-        kwargs=kwargs,
+        kwargs=final_kwargs,
     )
 
 def string_to_message(expr: IntoExpr, *, message_type: str) -> pl.Expr:
