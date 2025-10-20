@@ -40,26 +40,18 @@ fn get_default_model(provider: Provider) -> &'static str {
 #[polars_expr(output_type=String)]
 fn inference(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
-    
-    // Default model if not provided
-    let model = kwargs.model.unwrap_or_else(|| "gpt-4-turbo".to_string());
-    
+
+    // Determine provider and model
+    let provider = match &kwargs.provider {
+        Some(provider_str) => parse_provider(provider_str).unwrap_or(Provider::OpenAI),
+        None => Provider::OpenAI,
+    };
+
+    let model = kwargs.model.unwrap_or_else(|| get_default_model(provider).to_string());
+
     let out = ca.apply(|opt_value| {
         opt_value.map(|value| {
-            // If provider is specified, use fetch_api_response_with_provider
-            let response = match &kwargs.provider {
-                Some(provider_str) => {
-                    // Try to parse provider string to Provider enum
-                    if let Some(_provider) = parse_provider(provider_str) {
-                        // For now, we'll still use OpenAI since we don't have a sync version with provider
-                        fetch_api_response_sync(value, &model)
-                    } else {
-                        // Default to OpenAI if provider can't be parsed
-                        fetch_api_response_sync(value, &model)
-                    }
-                },
-                None => fetch_api_response_sync(value, &model),
-            };
+            let response = crate::utils::fetch_api_response_sync_with_provider(value, &model, provider);
             Cow::Owned(response.unwrap_or_default())
         })
     });
