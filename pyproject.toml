@@ -35,8 +35,18 @@ classifiers = [
   "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
   "Typing :: Typed",
 ]
+dependencies = [
+    "requests>=2.32.4",
+]
 
 [project.urls]
 "Bug Reports" = "https://github.com/daviddrummond95/polar_llama/issues"
 "Source" = "https://github.com/daviddrummond95/polar_llama"
 "Documentation" = "https://github.com/daviddrummond95/polar_llama#readme"
+
+[dependency-groups]
+dev = [
+    "polars>=1.8.2",
+    "pytest>=8.3.5",
+    "python-dotenv>=1.0.1",
+]

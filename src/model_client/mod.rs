@@ -181,7 +181,13 @@ pub async fn fetch_data_generic<T: ModelClient + Sync + ?Sized>(
         let reqwest_client = &reqwest_client;
         
         async move {
-            client.send_request(reqwest_client, &messages).await.ok()
+            match client.send_request(reqwest_client, &messages).await {
+                Ok(response) => Some(response),
+                Err(e) => {
+                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
+                    None
+                }
+            }
         }
     }).collect::<Vec<_>>();
     
@@ -200,7 +206,13 @@ pub async fn fetch_data_generic_enhanced<T: ModelClient + Sync + ?Sized>(
         let reqwest_client = &reqwest_client;
         
         async move {
-            client.send_request(reqwest_client, &messages).await.ok()
+            match client.send_request(reqwest_client, &messages).await {
+                Ok(response) => Some(response),
+                Err(e) => {
+                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
+                    None
+                }
+            }
         }
     }).collect::<Vec<_>>();
     
