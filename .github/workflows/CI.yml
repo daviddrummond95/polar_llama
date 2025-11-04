@@ -97,21 +97,17 @@ jobs:
       - name: Run Tests
         run: |
           source .venv/bin/activate
-          # Set dummy API keys to prevent errors in tests that might still use dotenv
-          export OPENAI_API_KEY="dummy_key"
-          export ANTHROPIC_API_KEY="dummy_key"
-          export GROQ_API_KEY="dummy_key"
-          export GEMINI_API_KEY="dummy_key"
-          
+          # Don't set API keys - let tests skip gracefully when not configured
+
           # Create a temporary directory and run tests from there
           mkdir -p /tmp/test_run
           cd /tmp/test_run
-          
+
           # Copy test files to temp directory
           cp -r $GITHUB_WORKSPACE/tests .
-          
-          # Run tests
-          python -m pytest tests -v --tb=short
+
+          # Run tests, excluding API integration tests (those run in test-llm-apis.yml workflow)
+          python -m pytest tests -v --tb=short --ignore=tests/test_parallel_inference.py
       
       # Run pre-commit checks
       - name: Run pre-commit checks
