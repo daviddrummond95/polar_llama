@@ -88,7 +88,7 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
             }).to_string();
 
             let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-            let auth = format!("Bearer {}", api_key);
+            let auth = format!("Bearer {api_key}");
 
             let response = agent.post("https://api.openai.com/v1/chat/completions")
                 .set("Authorization", auth.as_str())
@@ -98,7 +98,7 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
             let status = response.status();
             if response.ok() {
                 let response_text = response.into_string()
-                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {}", e)))?;
+                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
                 parse_openai_response(&response_text)
             } else {
                 let error_text = response.into_string()
@@ -124,7 +124,7 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
             let status = response.status();
             if response.ok() {
                 let response_text = response.into_string()
-                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {}", e)))?;
+                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
                 parse_anthropic_response(&response_text)
             } else {
                 let error_text = response.into_string()
@@ -145,7 +145,7 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
             }).to_string();
 
             let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
-            let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}/generateContent?key={}", model, api_key);
+            let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{model}/generateContent?key={api_key}");
 
             let response = agent.post(&url)
                 .set("Content-Type", "application/json")
@@ -154,7 +154,7 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
             let status = response.status();
             if response.ok() {
                 let response_text = response.into_string()
-                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {}", e)))?;
+                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
                 parse_gemini_response(&response_text)
             } else {
                 let error_text = response.into_string()
@@ -171,7 +171,7 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
             }).to_string();
 
             let api_key = std::env::var("GROQ_API_KEY").unwrap_or_default();
-            let auth = format!("Bearer {}", api_key);
+            let auth = format!("Bearer {api_key}");
 
             let response = agent.post("https://api.groq.com/openai/v1/chat/completions")
                 .set("Authorization", auth.as_str())
@@ -181,7 +181,7 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
             let status = response.status();
             if response.ok() {
                 let response_text = response.into_string()
-                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {}", e)))?;
+                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
                 parse_openai_response(&response_text) // Groq uses OpenAI-compatible format
             } else {
                 let error_text = response.into_string()

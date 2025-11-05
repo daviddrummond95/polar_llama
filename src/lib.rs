@@ -40,7 +40,7 @@ impl PyProvider {
         match Provider::from_str(provider_str) {
             Ok(provider) => Ok(PyProvider(provider)),
             Err(err) => Err(pyo3::exceptions::PyValueError::new_err(
-                format!("Invalid provider: {}", err)
+                format!("Invalid provider: {err}")
             )),
         }
     }

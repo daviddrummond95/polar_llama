@@ -64,7 +64,7 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
     let input_series = &inputs[0];
 
     // Handle empty series or null dtype - return empty String series
-    if input_series.len() == 0 || input_series.dtype() == &polars::datatypes::DataType::Null {
+    if input_series.is_empty() || input_series.dtype() == &polars::datatypes::DataType::Null {
         return Ok(StringChunked::from_iter_options(
             input_series.name().clone(),
             std::iter::empty::<Option<String>>(),
@@ -142,8 +142,7 @@ fn string_to_message(inputs: &[Series], kwargs: MessageKwargs) -> PolarsResult<S
     let out: StringChunked = ca.apply(|opt_value| {
         opt_value.map(|value| {
             Cow::Owned(format!(
-                "{{\"role\": \"{}\", \"content\": \"{}\"}}",
-                message_type, value
+                "{{\"role\": \"{message_type}\", \"content\": \"{value}\"}}"
             ))
         })
     });
@@ -156,7 +155,7 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
     let input_series = &inputs[0];
 
     // Handle empty series or null dtype - return empty String series
-    if input_series.len() == 0 || input_series.dtype() == &polars::datatypes::DataType::Null {
+    if input_series.is_empty() || input_series.dtype() == &polars::datatypes::DataType::Null {
         return Ok(StringChunked::from_iter_options(
             input_series.name().clone(),
             std::iter::empty::<Option<String>>(),

@@ -133,7 +133,7 @@ impl ModelClient for BedrockClient {
         // We don't use the reqwest client for Bedrock, we use the AWS SDK
         let mut bedrock_client_ref = self.clone();
         let bedrock_client = bedrock_client_ref.get_bedrock_client().await
-            .map_err(|e| ModelClientError::ParseError(format!("Failed to create Bedrock client: {}", e)))?;
+            .map_err(|e| ModelClientError::ParseError(format!("Failed to create Bedrock client: {e}")))?;
         
         let (system_prompt, bedrock_messages) = self.convert_messages_to_bedrock(messages);
         
@@ -149,7 +149,7 @@ impl ModelClient for BedrockClient {
         let response = converse_request
             .send()
             .await
-            .map_err(|e| ModelClientError::ParseError(format!("Bedrock API error: {}", e)))?;
+            .map_err(|e| ModelClientError::ParseError(format!("Bedrock API error: {e}")))?;
         
         // Extract the response text
         if let Some(output) = response.output {
