@@ -2,3 +2,7 @@
 *.pyc
 target
 .env
+uv.lock
+Cargo.lock
+PARALLELIZATION.md
+Cargo.lock

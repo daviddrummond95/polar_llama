@@ -40,26 +40,18 @@ fn get_default_model(provider: Provider) -> &'static str {
 #[polars_expr(output_type=String)]
 fn inference(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
-    
-    // Default model if not provided
-    let model = kwargs.model.unwrap_or_else(|| "gpt-4-turbo".to_string());
-    
+
+    // Determine provider and model
+    let provider = match &kwargs.provider {
+        Some(provider_str) => parse_provider(provider_str).unwrap_or(Provider::OpenAI),
+        None => Provider::OpenAI,
+    };
+
+    let model = kwargs.model.unwrap_or_else(|| get_default_model(provider).to_string());
+
     let out = ca.apply(|opt_value| {
         opt_value.map(|value| {
-            // If provider is specified, use fetch_api_response_with_provider
-            let response = match &kwargs.provider {
-                Some(provider_str) => {
-                    // Try to parse provider string to Provider enum
-                    if let Some(_provider) = parse_provider(provider_str) {
-                        // For now, we'll still use OpenAI since we don't have a sync version with provider
-                        fetch_api_response_sync(value, &model)
-                    } else {
-                        // Default to OpenAI if provider can't be parsed
-                        fetch_api_response_sync(value, &model)
-                    }
-                },
-                None => fetch_api_response_sync(value, &model),
-            };
+            let response = crate::utils::fetch_api_response_sync_with_provider(value, &model, provider);
             Cow::Owned(response.unwrap_or_default())
         })
     });
@@ -69,14 +61,31 @@ fn inference(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series>
 // Register the asynchronous inference function with Polars
 #[polars_expr(output_type=String)]
 fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
-    let ca: &StringChunked = inputs[0].str()?;
-    let messages: Vec<String> = ca
-        .into_iter()
-        .filter_map(|opt| opt.map(|s| s.to_owned()))
-        .collect();
+    let input_series = &inputs[0];
+
+    // Handle empty series or null dtype - return empty String series
+    if input_series.is_empty() || input_series.dtype() == &polars::datatypes::DataType::Null {
+        return Ok(StringChunked::from_iter_options(
+            input_series.name().clone(),
+            std::iter::empty::<Option<String>>(),
+        ).into_series());
+    }
+
+    let ca: &StringChunked = input_series.str()?;
+
+    // Collect all messages, keeping track of their original indices
+    let mut messages_with_indices: Vec<(usize, String)> = Vec::new();
+    for (idx, opt_value) in ca.into_iter().enumerate() {
+        if let Some(value) = opt_value {
+            messages_with_indices.push((idx, value.to_owned()));
+        }
+    }
+
+    // Extract just the messages for the API calls
+    let messages: Vec<String> = messages_with_indices.iter().map(|(_, msg)| msg.clone()).collect();
 
     // Get results based on provider and model
-    let results = match (&kwargs.provider, &kwargs.model) {
+    let api_results = match (&kwargs.provider, &kwargs.model) {
         (Some(provider_str), Some(model)) => {
             // Try to parse provider string to Provider enum
             if let Some(provider) = parse_provider(provider_str) {
@@ -108,8 +117,13 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
         },
     };
 
-    let string_refs: Vec<Option<String>> = results.into_iter().collect();
-    let out = StringChunked::from_iter_options(ca.name().clone(), string_refs.into_iter());
+    // Map results back to original positions
+    let mut results: Vec<Option<String>> = vec![None; ca.len()];
+    for ((idx, _), result) in messages_with_indices.iter().zip(api_results.iter()) {
+        results[*idx] = result.clone();
+    }
+
+    let out = StringChunked::from_iter_options(ca.name().clone(), results.into_iter());
 
     Ok(out.into_series())
 }
@@ -128,8 +142,7 @@ fn string_to_message(inputs: &[Series], kwargs: MessageKwargs) -> PolarsResult<S
     let out: StringChunked = ca.apply(|opt_value| {
         opt_value.map(|value| {
             Cow::Owned(format!(
-                "{{\"role\": \"{}\", \"content\": \"{}\"}}",
-                message_type, value
+                "{{\"role\": \"{message_type}\", \"content\": \"{value}\"}}"
             ))
         })
     });
@@ -139,19 +152,33 @@ fn string_to_message(inputs: &[Series], kwargs: MessageKwargs) -> PolarsResult<S
 // New function to handle JSON arrays of messages
 #[polars_expr(output_type=String)]
 fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
-    let ca: &StringChunked = inputs[0].str()?;
-    
-    // Convert string inputs (JSON arrays) to vectors of messages
-    let message_arrays: Vec<Vec<Message>> = ca
-        .into_iter()
-        .filter_map(|opt| opt.map(|s| {
+    let input_series = &inputs[0];
+
+    // Handle empty series or null dtype - return empty String series
+    if input_series.is_empty() || input_series.dtype() == &polars::datatypes::DataType::Null {
+        return Ok(StringChunked::from_iter_options(
+            input_series.name().clone(),
+            std::iter::empty::<Option<String>>(),
+        ).into_series());
+    }
+
+    let ca: &StringChunked = input_series.str()?;
+
+    // Collect message arrays, keeping track of their original indices
+    let mut arrays_with_indices: Vec<(usize, Vec<Message>)> = Vec::new();
+    for (idx, opt) in ca.into_iter().enumerate() {
+        if let Some(s) = opt {
             // Parse the JSON string into a vector of Messages
-            crate::utils::parse_message_json(s).unwrap_or_default()
-        }))
-        .collect();
-    
+            let messages = crate::utils::parse_message_json(s).unwrap_or_default();
+            arrays_with_indices.push((idx, messages));
+        }
+    }
+
+    // Extract just the message arrays for the API calls
+    let message_arrays: Vec<Vec<Message>> = arrays_with_indices.iter().map(|(_, arr)| arr.clone()).collect();
+
     // Get results based on provider and model
-    let results = match (&kwargs.provider, &kwargs.model) {
+    let api_results = match (&kwargs.provider, &kwargs.model) {
         (Some(provider_str), Some(model)) => {
             // Try to parse provider string to Provider enum
             if let Some(provider) = parse_provider(provider_str) {
@@ -183,8 +210,13 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
         },
     };
 
-    let string_refs: Vec<Option<String>> = results.into_iter().collect();
-    let out = StringChunked::from_iter_options(ca.name().clone(), string_refs.into_iter());
+    // Map results back to original positions
+    let mut results: Vec<Option<String>> = vec![None; ca.len()];
+    for ((idx, _), result) in arrays_with_indices.iter().zip(api_results.iter()) {
+        results[*idx] = result.clone();
+    }
+
+    let out = StringChunked::from_iter_options(ca.name().clone(), results.into_iter());
 
     Ok(out.into_series())
 }

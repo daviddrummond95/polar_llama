@@ -5,7 +5,7 @@ edition = "2021"
 
 [lib]
 name = "polar_llama"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
 pyo3-build-config = "0.21.2"
@@ -29,3 +29,7 @@ aws-sdk-bedrockruntime = "1.15.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
+
+[dev-dependencies]
+dotenvy = "0.15"
+tokio-test = "0.4"

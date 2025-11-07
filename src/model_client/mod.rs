@@ -51,7 +51,7 @@ impl FromStr for Provider {
             "gemini" => Ok(Provider::Gemini),
             "groq" => Ok(Provider::Groq),
             "bedrock" => Ok(Provider::Bedrock),
-            _ => Err(format!("Unknown provider: {}", s)),
+            _ => Err(format!("Unknown provider: {s}")),
         }
     }
 }
@@ -67,10 +67,10 @@ pub enum ModelClientError {
 impl fmt::Display for ModelClientError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ModelClientError::Http(code, ref message) => write!(f, "HTTP Error {}: {}", code, message),
-            ModelClientError::Serialization(ref err) => write!(f, "Serialization Error: {}", err),
-            ModelClientError::RequestError(ref err) => write!(f, "Request Error: {}", err),
-            ModelClientError::ParseError(ref err) => write!(f, "Parse Error: {}", err),
+            ModelClientError::Http(code, ref message) => write!(f, "HTTP Error {code}: {message}"),
+            ModelClientError::Serialization(ref err) => write!(f, "Serialization Error: {err}"),
+            ModelClientError::RequestError(ref err) => write!(f, "Request Error: {err}"),
+            ModelClientError::ParseError(ref err) => write!(f, "Parse Error: {err}"),
         }
     }
 }
@@ -181,7 +181,13 @@ pub async fn fetch_data_generic<T: ModelClient + Sync + ?Sized>(
         let reqwest_client = &reqwest_client;
         
         async move {
-            client.send_request(reqwest_client, &messages).await.ok()
+            match client.send_request(reqwest_client, &messages).await {
+                Ok(response) => Some(response),
+                Err(e) => {
+                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
+                    None
+                }
+            }
         }
     }).collect::<Vec<_>>();
     
@@ -200,7 +206,13 @@ pub async fn fetch_data_generic_enhanced<T: ModelClient + Sync + ?Sized>(
         let reqwest_client = &reqwest_client;
         
         async move {
-            client.send_request(reqwest_client, &messages).await.ok()
+            match client.send_request(reqwest_client, &messages).await {
+                Ok(response) => Some(response),
+                Err(e) => {
+                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
+                    None
+                }
+            }
         }
     }).collect::<Vec<_>>();
     

@@ -138,6 +138,35 @@ df = df.with_columns(
 - **Context Preservation**: Maintain conversation context with multi-message support for more natural interactions.
 - **Provider Flexibility**: Choose from multiple LLM providers based on your needs and access.
 
+#### Testing
+
+Polar Llama includes a comprehensive test suite that validates parallel execution, provider support, and core functionality.
+
+**Setup:**
+
+1. Copy `.env.example` to `.env` and add your API keys:
+   ```bash
+   cp .env.example .env
+   # Edit .env and add your provider API keys
+   ```
+
+2. Install test dependencies:
+   ```bash
+   pip install -r tests/requirements.txt
+   ```
+
+**Run Python tests:**
+```bash
+pytest tests/ -v
+```
+
+**Run Rust tests:**
+```bash
+cargo test --test model_client_tests -- --nocapture
+```
+
+Tests automatically detect configured providers and only run tests for those with valid API keys. See [tests/README.md](tests/README.md) for detailed testing documentation.
+
 #### Contributing
 
 We welcome contributions to Polar Llama! If you're interested in improving the library or adding new features, please feel free to fork the repository and submit a pull request.
