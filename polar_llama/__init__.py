@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union, Type
+import json
 
 import polars as pl
 
@@ -9,6 +10,7 @@ from polar_llama.utils import parse_into_expr, register_plugin, parse_version
 
 if TYPE_CHECKING:
     from polars.type_aliases import IntoExpr
+    from pydantic import BaseModel
 
 if parse_version(pl.__version__) < parse_version("0.20.16"):
     from polars.utils.udfs import _get_shared_lib_location
@@ -48,15 +50,29 @@ ensure_expressions_registered()
 # Update the lib path to make sure we're using the actual library
 lib = get_lib_path()
 
+def _pydantic_to_json_schema(model: Type['BaseModel']) -> dict:
+    """Convert a Pydantic model to JSON schema."""
+    try:
+        from pydantic import BaseModel
+        if not issubclass(model, BaseModel):
+            raise ValueError("response_model must be a Pydantic BaseModel subclass")
+
+        # Get the JSON schema from the Pydantic model
+        schema = model.model_json_schema()
+        return schema
+    except ImportError:
+        raise ImportError("Pydantic is required for structured outputs. Install with: pip install pydantic>=2.0.0")
+
 def inference_async(
-    expr: IntoExpr, 
-    *, 
-    provider: Optional[Union[str, Provider]] = None, 
-    model: Optional[str] = None
+    expr: IntoExpr,
+    *,
+    provider: Optional[Union[str, Provider]] = None,
+    model: Optional[str] = None,
+    response_model: Optional[Type['BaseModel']] = None
 ) -> pl.Expr:
     """
     Asynchronously infer completions for the given text expressions using an LLM.
-    
+
     Parameters
     ----------
     expr : polars.Expr
@@ -65,7 +81,10 @@ def inference_async(
         The provider to use (OpenAI, Anthropic, Gemini, Groq, Bedrock)
     model : str, optional
         The model name to use
-        
+    response_model : Type[BaseModel], optional
+        A Pydantic model class to define structured output schema.
+        The LLM response will be validated against this schema.
+
     Returns
     -------
     polars.Expr
@@ -73,16 +92,22 @@ def inference_async(
     """
     expr = parse_into_expr(expr)
     kwargs = {}
-    
+
     if provider is not None:
         # Convert Provider to string to make it picklable
         if isinstance(provider, Provider):
             provider = str(provider)
         kwargs["provider"] = provider
-        
+
     if model is not None:
         kwargs["model"] = model
-        
+
+    if response_model is not None:
+        schema = _pydantic_to_json_schema(response_model)
+        # Pass the JSON schema as a JSON string to Rust
+        kwargs["response_schema"] = json.dumps(schema)
+        kwargs["response_model_name"] = response_model.__name__
+
     return register_plugin(
         args=[expr],
         symbol="inference_async",
@@ -92,14 +117,15 @@ def inference_async(
     )
 
 def inference(
-    expr: IntoExpr, 
-    *, 
-    provider: Optional[Union[str, Provider]] = None, 
-    model: Optional[str] = None
+    expr: IntoExpr,
+    *,
+    provider: Optional[Union[str, Provider]] = None,
+    model: Optional[str] = None,
+    response_model: Optional[Type['BaseModel']] = None
 ) -> pl.Expr:
     """
     Synchronously infer completions for the given text expressions using an LLM.
-    
+
     Parameters
     ----------
     expr : polars.Expr
@@ -108,7 +134,10 @@ def inference(
         The provider to use (OpenAI, Anthropic, Gemini, Groq, Bedrock)
     model : str, optional
         The model name to use
-        
+    response_model : Type[BaseModel], optional
+        A Pydantic model class to define structured output schema.
+        The LLM response will be validated against this schema.
+
     Returns
     -------
     polars.Expr
@@ -116,16 +145,22 @@ def inference(
     """
     expr = parse_into_expr(expr)
     kwargs = {}
-    
+
     if provider is not None:
         # Convert Provider to string to make it picklable
         if isinstance(provider, Provider):
             provider = str(provider)
         kwargs["provider"] = provider
-        
+
     if model is not None:
         kwargs["model"] = model
-        
+
+    if response_model is not None:
+        schema = _pydantic_to_json_schema(response_model)
+        # Pass the JSON schema as a JSON string to Rust
+        kwargs["response_schema"] = json.dumps(schema)
+        kwargs["response_model_name"] = response_model.__name__
+
     return register_plugin(
         args=[expr],
         symbol="inference",
@@ -135,17 +170,18 @@ def inference(
     )
 
 def inference_messages(
-    expr: IntoExpr, 
-    *, 
-    provider: Optional[Union[str, Provider]] = None, 
-    model: Optional[str] = None
+    expr: IntoExpr,
+    *,
+    provider: Optional[Union[str, Provider]] = None,
+    model: Optional[str] = None,
+    response_model: Optional[Type['BaseModel']] = None
 ) -> pl.Expr:
     """
     Process message arrays (conversations) for inference using LLMs.
-    
+
     This function accepts properly formatted JSON message arrays and sends them
     to the LLM for inference while preserving conversation context.
-    
+
     Parameters
     ----------
     expr : polars.Expr
@@ -154,21 +190,18 @@ def inference_messages(
         The provider to use (OpenAI, Anthropic, Gemini, Groq, Bedrock)
     model : str, optional
         The model name to use
-        
+    response_model : Type[BaseModel], optional
+        A Pydantic model class to define structured output schema.
+        The LLM response will be validated against this schema.
+
     Returns
     -------
     polars.Expr
         Expression with inferred completions
     """
-    import inspect
-    print(f"Type of provider: {type(provider)}")
-    if provider is not None:
-        print(f"Provider value: {provider}")
-        print(f"Provider attributes: {inspect.getmembers(provider)}")
-    
     expr = parse_into_expr(expr)
     kwargs = {}
-    
+
     if provider is not None:
         # Convert Provider to string to make it picklable
         if hasattr(provider, 'as_str'):
@@ -177,16 +210,19 @@ def inference_messages(
             provider_str = str(provider)
         else:
             provider_str = provider
-        
-        print(f"Provider string: {provider_str}")
+
         kwargs["provider"] = provider_str
-        
+
     if model is not None:
         kwargs["model"] = model
-    
-    print(f"Final kwargs: {kwargs}")
-    
-    # Don't pass empty kwargs dictionary    
+
+    if response_model is not None:
+        schema = _pydantic_to_json_schema(response_model)
+        # Pass the JSON schema as a JSON string to Rust
+        kwargs["response_schema"] = json.dumps(schema)
+        kwargs["response_model_name"] = response_model.__name__
+
+    # Don't pass empty kwargs dictionary
     if not kwargs:
         return register_plugin(
             args=[expr],
@@ -194,7 +230,7 @@ def inference_messages(
             is_elementwise=True,
             lib=lib,
         )
-    
+
     return register_plugin(
         args=[expr],
         symbol="inference_messages",

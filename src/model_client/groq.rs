@@ -103,16 +103,32 @@ impl ModelClient for GroqClient {
         json!(formatted_messages)
     }
     
-    fn format_request_body(&self, messages: &[Message]) -> Value {
+    fn format_request_body(&self, messages: &[Message], schema: Option<&str>, model_name: Option<&str>) -> Value {
         // Build a request similar to OpenAI
-        json!({
+        let mut body = json!({
             "model": self.model_name(),
             "messages": self.format_messages(messages),
             "temperature": 0.7,
             "max_tokens": 1024
-        })
+        });
+
+        // Add structured output support if schema is provided (Groq supports OpenAI format)
+        if let Some(schema_str) = schema {
+            if let Ok(schema_value) = serde_json::from_str::<Value>(schema_str) {
+                body["response_format"] = json!({
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": model_name.unwrap_or("response"),
+                        "strict": true,
+                        "schema": schema_value
+                    }
+                });
+            }
+        }
+
+        body
     }
-    
+
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {
         match serde_json::from_str::<GroqCompletion>(response_text) {
             Ok(completion) => {
@@ -127,21 +143,21 @@ impl ModelClient for GroqClient {
             }
         }
     }
-    
+
     async fn send_request(&self, client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
         let api_key = self.get_api_key();
-        let body = serde_json::to_string(&self.format_request_body(messages))?;
-        
+        let body = serde_json::to_string(&self.format_request_body(messages, None, None))?;
+
         let response = client.post(self.api_endpoint())
             .bearer_auth(api_key)
             .header("Content-Type", "application/json")
             .body(body)
             .send()
             .await?;
-            
+
         let status = response.status();
         let text = response.text().await?;
-        
+
         if status.is_success() {
             self.parse_response(&text)
         } else {

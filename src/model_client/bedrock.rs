@@ -112,17 +112,24 @@ impl ModelClient for BedrockClient {
     fn format_messages(&self, messages: &[Message]) -> Value {
         // Convert to JSON for compatibility with the trait
         let mut formatted_messages = Vec::new();
-        
+
         for msg in messages {
             formatted_messages.push(json!({
                 "role": msg.role,
                 "content": msg.content
             }));
         }
-        
+
         json!(formatted_messages)
     }
-    
+
+    fn format_request_body(&self, messages: &[Message], _schema: Option<&str>, _model_name: Option<&str>) -> Value {
+        // Bedrock uses AWS SDK, not HTTP requests, but we need to implement this for trait compliance
+        json!({
+            "messages": self.format_messages(messages)
+        })
+    }
+
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {
         // For Bedrock, this method won't be used as we handle responses directly in send_request
         // But we need to implement it for trait compliance
