@@ -3,6 +3,10 @@ from polar_llama import inference_async, Provider
 from pydantic import BaseModel
 import os
 import json
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class MovieRecommendation(BaseModel):
@@ -30,7 +34,7 @@ def test_structured_output_basic():
         recommendation=inference_async(
             pl.col("prompt"),
             provider=Provider.GROQ,
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             response_model=MovieRecommendation
         )
     )
@@ -93,7 +97,7 @@ def test_structured_output_multiple_rows():
         person_info=inference_async(
             pl.col("prompt"),
             provider=Provider.GROQ,
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             response_model=PersonInfo
         )
     )

@@ -59,6 +59,23 @@ def _pydantic_to_json_schema(model: Type['BaseModel']) -> dict:
 
         # Get the JSON schema from the Pydantic model
         schema = model.model_json_schema()
+
+        # Recursively add additionalProperties: false to all objects
+        # This is required by some providers like Groq
+        def add_additional_properties_false(obj):
+            if isinstance(obj, dict):
+                if obj.get("type") == "object":
+                    obj["additionalProperties"] = False
+                # Recursively process nested objects
+                for key, value in obj.items():
+                    if isinstance(value, dict):
+                        add_additional_properties_false(value)
+                    elif isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, dict):
+                                add_additional_properties_false(item)
+
+        add_additional_properties_false(schema)
         return schema
     except ImportError:
         raise ImportError("Pydantic is required for structured outputs. Install with: pip install pydantic>=2.0.0")
