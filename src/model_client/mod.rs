@@ -245,17 +245,17 @@ pub fn validate_json_schema(response: &str, schema_str: &str) -> Result<(), Stri
 pub fn create_error_response(error_type: &str, details: &str, raw: Option<&str>) -> String {
     let error_obj = if let Some(raw_content) = raw {
         serde_json::json!({
-            "error": error_type,
-            "details": details,
-            "raw": raw_content
+            "_error": error_type,
+            "_details": details,
+            "_raw": raw_content
         })
     } else {
         serde_json::json!({
-            "error": error_type,
-            "details": details
+            "_error": error_type,
+            "_details": details
         })
     };
-    serde_json::to_string(&error_obj).unwrap_or_else(|_| format!(r#"{{"error": "{}"}}"#, error_type))
+    serde_json::to_string(&error_obj).unwrap_or_else(|_| format!(r#"{{"_error": "{}"}}"#, error_type))
 }
 
 /// Create a client for the given provider and model
@@ -274,7 +274,10 @@ pub async fn fetch_data_generic<T: ModelClient + Sync + ?Sized>(
     client: &T,
     messages: &[String]
 ) -> Vec<Option<String>> {
-    let reqwest_client = Client::new();
+    let reqwest_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
 
     let fetch_tasks = messages.iter().map(|content| {
         let formatted_message = Message {
@@ -305,7 +308,10 @@ pub async fn fetch_data_generic_with_schema<T: ModelClient + Sync + ?Sized>(
     schema: Option<&str>,
     model_name: Option<&str>
 ) -> Vec<Option<String>> {
-    let reqwest_client = Client::new();
+    let reqwest_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
 
     let fetch_tasks = messages.iter().map(|content| {
         let formatted_message = Message {
@@ -353,7 +359,10 @@ pub async fn fetch_data_generic_enhanced<T: ModelClient + Sync + ?Sized>(
     client: &T,
     message_arrays: &[Vec<Message>]
 ) -> Vec<Option<String>> {
-    let reqwest_client = Client::new();
+    let reqwest_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
 
     let fetch_tasks = message_arrays.iter().map(|messages| {
         let messages = messages.clone();
@@ -380,7 +389,10 @@ pub async fn fetch_data_generic_enhanced_with_schema<T: ModelClient + Sync + ?Si
     schema: Option<&str>,
     model_name: Option<&str>
 ) -> Vec<Option<String>> {
-    let reqwest_client = Client::new();
+    let reqwest_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
 
     let fetch_tasks = message_arrays.iter().map(|messages| {
         let messages = messages.clone();

@@ -35,40 +35,35 @@ def test_structured_output_basic():
         )
     )
 
-    print("\nTest Results:")
+    print("\nTest Results (Struct):")
     print(result_df)
 
-    # Get the result
-    recommendation_json = result_df["recommendation"][0]
-    print(f"\nRaw response:\n{recommendation_json}")
-
-    # Try to parse as JSON
+    # Access struct fields directly!
+    print("\n✨ Direct struct field access:")
     try:
-        parsed = json.loads(recommendation_json)
-        print(f"\nParsed recommendation:")
-        print(f"  Title: {parsed.get('title')}")
-        print(f"  Genre: {parsed.get('genre')}")
-        print(f"  Year: {parsed.get('year')}")
-        print(f"  Reason: {parsed.get('reason')}")
+        # First check the raw response to see what we got
+        raw = result_df['recommendation'].struct.field('_raw')[0]
+        print(f"  Raw response: {raw}")
 
-        # Check if it's a valid response or an error
-        if "error" in parsed:
-            print(f"\n⚠️  Error occurred: {parsed['error']}")
-            print(f"  Details: {parsed.get('details')}")
-            if "raw" in parsed:
-                print(f"  Raw response: {parsed['raw']}")
+        print(f"  Title: {result_df['recommendation'].struct.field('title')[0]}")
+        print(f"  Genre: {result_df['recommendation'].struct.field('genre')[0]}")
+        print(f"  Year: {result_df['recommendation'].struct.field('year')[0]}")
+        print(f"  Reason: {result_df['recommendation'].struct.field('reason')[0]}")
+
+        # Check for errors
+        error = result_df['recommendation'].struct.field('_error')[0]
+        print(f"  Error field: {error}")
+        if error:
+            print(f"\n⚠️  Error occurred: {error}")
+            details = result_df['recommendation'].struct.field('_details')[0]
+            print(f"  Details: {details}")
         else:
-            # Validate with Pydantic
-            movie = MovieRecommendation(**parsed)
-            print(f"\n✓ Successfully validated with Pydantic!")
-            print(f"  Movie: {movie.title} ({movie.year})")
-            print(f"  Genre: {movie.genre}")
-            print(f"  Reason: {movie.reason}")
-    except json.JSONDecodeError as e:
-        print(f"\n✗ Failed to parse as JSON: {e}")
-        print(f"  Response: {recommendation_json}")
+            print(f"\n✓ Successfully returned structured output!")
+
     except Exception as e:
-        print(f"\n✗ Validation failed: {e}")
+        print(f"\n✗ Error accessing struct fields: {e}")
+        print(f"  Result type: {type(result_df['recommendation'])}")
+        print(f"  Result dtype: {result_df['recommendation'].dtype}")
 
 
 class PersonInfo(BaseModel):
@@ -103,27 +98,33 @@ def test_structured_output_multiple_rows():
         )
     )
 
-    print("\nMultiple Rows Test Results:")
+    print("\nMultiple Rows Test Results (Struct):")
     print(result_df)
 
-    # Process each result
-    for idx, person_json in enumerate(result_df["person_info"]):
-        print(f"\n--- Row {idx} ---")
-        print(f"Raw response: {person_json}")
+    # Access struct fields directly for all rows!
+    print("\n✨ Direct struct field access for all rows:")
+    try:
+        names = result_df['person_info'].struct.field('name')
+        ages = result_df['person_info'].struct.field('age')
+        occupations = result_df['person_info'].struct.field('occupation')
+        hobbies = result_df['person_info'].struct.field('hobbies')
 
-        try:
-            parsed = json.loads(person_json)
+        for idx in range(len(result_df)):
+            print(f"\n--- Row {idx} ---")
+            print(f"  Name: {names[idx]}")
+            print(f"  Age: {ages[idx]}")
+            print(f"  Occupation: {occupations[idx]}")
+            print(f"  Hobbies: {hobbies[idx]}")
 
-            if "error" in parsed:
-                print(f"⚠️  Error: {parsed['error']}")
-                if "details" in parsed:
-                    print(f"   Details: {parsed['details']}")
+            # Check for errors
+            error = result_df['person_info'].struct.field('_error')[idx]
+            if error:
+                print(f"  ⚠️  Error: {error}")
             else:
-                person = PersonInfo(**parsed)
-                print(f"✓ Valid: {person.name}, {person.age}, {person.occupation}")
-                print(f"  Hobbies: {', '.join(person.hobbies)}")
-        except Exception as e:
-            print(f"✗ Failed: {e}")
+                print(f"  ✓ Valid")
+
+    except Exception as e:
+        print(f"\n✗ Error accessing struct fields: {e}")
 
 
 if __name__ == "__main__":
