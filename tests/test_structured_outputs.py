@@ -1,6 +1,7 @@
 import polars as pl
 from polar_llama import inference_async, Provider
 from pydantic import BaseModel
+from typing import List
 import os
 import json
 from dotenv import load_dotenv
@@ -75,7 +76,7 @@ class PersonInfo(BaseModel):
     name: str
     age: int
     occupation: str
-    hobbies: list[str]
+    hobbies: List[str]
 
 
 def test_structured_output_multiple_rows():
