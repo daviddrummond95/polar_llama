@@ -5,13 +5,13 @@ build-backend = "maturin"
 [project]
 name = "polar-llama"
 dynamic = ["version"]
-description = "Parallel inference calls to LLM APIs using Polars dataframes"
+description = "Parallel inference calls to LLM APIs using Polars dataframes with Pydantic-based structured outputs"
 authors = [{name = "David Drummond", email = "daviddrummond95@gmail.com"}]
 readme = "README.md"
 homepage = "https://github.com/daviddrummond95/polar_llama"
 repository = "https://github.com/daviddrummond95/polar_llama"
 documentation = "https://github.com/daviddrummond95/polar_llama#readme"
-keywords = ["llm", "polars", "parallel", "inference", "ai", "openai", "anthropic", "gemini", "groq", "bedrock", "chatgpt", "dataframe"]
+keywords = ["llm", "polars", "parallel", "inference", "ai", "openai", "anthropic", "gemini", "groq", "bedrock", "chatgpt", "dataframe", "pydantic", "structured-outputs", "schema-validation"]
 license = {text = "MIT"}
 requires-python = ">=3.8"
 classifiers = [
@@ -37,6 +37,7 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.32.4",
+    "pydantic>=2.0.0",
 ]
 
 [project.urls]

@@ -120,16 +120,23 @@ impl ModelClient for GeminiClient {
         json!(formatted_messages)
     }
     
-    fn format_request_body(&self, messages: &[Message]) -> Value {
-        json!({
+    fn format_request_body(&self, messages: &[Message], schema: Option<&str>, _model_name: Option<&str>) -> Value {
+        let mut body = json!({
             "contents": self.format_messages(messages),
             "generationConfig": {
                 "temperature": 0.7,
                 "maxOutputTokens": 1024
             }
-        })
+        });
+
+        // Gemini structured output support is limited, we'll use JSON mode and post-validate
+        if schema.is_some() {
+            body["generationConfig"]["response_mime_type"] = json!("application/json");
+        }
+
+        body
     }
-    
+
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {
         match serde_json::from_str::<GeminiResponse>(response_text) {
             Ok(response) => {
@@ -145,22 +152,22 @@ impl ModelClient for GeminiClient {
             }
         }
     }
-    
+
     async fn send_request(&self, client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
         let api_key = self.get_api_key();
-        let body = serde_json::to_string(&self.format_request_body(messages))?;
-        
+        let body = serde_json::to_string(&self.format_request_body(messages, None, None))?;
+
         let url = format!("{}?key={}", self.api_endpoint(), api_key);
-        
+
         let response = client.post(url)
             .header("Content-Type", "application/json")
             .body(body)
             .send()
             .await?;
-            
+
         let status = response.status();
         let text = response.text().await?;
-        
+
         if status.is_success() {
             self.parse_response(&text)
         } else {

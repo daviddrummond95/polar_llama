@@ -9,6 +9,7 @@ This test suite includes:
 - **Rust Integration Tests** (`model_client_tests.rs`): Tests the core Rust model_client interface
 - **Python Tests**: Tests the Python/Polars interface exposed via PyO3
   - `test_parallel_inference.py`: Comprehensive tests for parallel execution and provider support
+  - `test_structured_outputs.py`: Tests for Pydantic-based structured outputs with schema validation
   - `test_message_arrays.py`: Tests for message array handling
   - `test_provider.py`: Tests for Provider enum
   - Other basic functionality tests
@@ -21,6 +22,7 @@ This test suite includes:
 ✅ Tests both synchronous and asynchronous inference
 ✅ Tests conversational inference with message arrays
 ✅ Tests system message support
+✅ Tests structured outputs with Pydantic schema validation
 ✅ Handles edge cases and error conditions
 
 ## Setup
@@ -90,6 +92,12 @@ Run tests for a specific provider (if configured):
 pytest test_parallel_inference.py -v -k "openai"
 ```
 
+Run structured output tests:
+
+```bash
+pytest test_structured_outputs.py -v
+```
+
 ### Rust Tests
 
 Run Rust integration tests:
@@ -145,6 +153,28 @@ cargo test --test model_client_tests test_parallel_execution -- --nocapture
 - **Edge Cases**
   - Empty dataframes
   - Null values
+
+#### `test_structured_outputs.py`
+
+- **Basic Structured Output Tests**
+  - Test Pydantic model schema conversion
+  - Verify LLM returns data matching schema
+  - Test Polars Struct field access
+
+- **Multiple Rows Tests**
+  - Test structured outputs across multiple DataFrame rows
+  - Verify parallel processing with structured schemas
+  - Test error handling for individual row failures
+
+- **Schema Validation**
+  - Test type coercion (strings, integers, floats, booleans)
+  - Test array/list handling
+  - Test nested object structures
+
+- **Error Handling**
+  - Test `_error`, `_details`, and `_raw` fields
+  - Verify graceful handling of validation failures
+  - Test that failures in one row don't affect others
 
 #### Other Python Tests
 

@@ -255,3 +255,27 @@ fn parse_gemini_response(response_text: &str) -> Result<String, ModelClientError
 
     Err(ModelClientError::ParseError("No response content found in Gemini response".to_string()))
 }
+
+// New functions supporting structured outputs with validation
+
+pub async fn fetch_data_with_provider_and_schema(
+    messages: &[String],
+    provider: Provider,
+    model: &str,
+    schema: Option<&str>,
+    model_name: Option<&str>
+) -> Vec<Option<String>> {
+    let client = create_client(provider, model);
+    model_client::fetch_data_generic_with_schema(&*client, messages, schema, model_name).await
+}
+
+pub async fn fetch_data_message_arrays_with_provider_and_schema(
+    message_arrays: &[Vec<Message>],
+    provider: Provider,
+    model: &str,
+    schema: Option<&str>,
+    model_name: Option<&str>
+) -> Vec<Option<String>> {
+    let client = create_client(provider, model);
+    model_client::fetch_data_generic_enhanced_with_schema(&*client, message_arrays, schema, model_name).await
+}

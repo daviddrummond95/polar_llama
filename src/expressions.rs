@@ -19,6 +19,10 @@ pub struct InferenceKwargs {
     provider: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    response_schema: Option<String>,
+    #[serde(default)]
+    response_model_name: Option<String>,
 }
 
 fn parse_provider(provider_str: &str) -> Option<Provider> {
@@ -85,36 +89,62 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
     let messages: Vec<String> = messages_with_indices.iter().map(|(_, msg)| msg.clone()).collect();
 
     // Get results based on provider and model
-    let api_results = match (&kwargs.provider, &kwargs.model) {
-        (Some(provider_str), Some(model)) => {
-            // Try to parse provider string to Provider enum
-            if let Some(provider) = parse_provider(provider_str) {
-                // Use provider and model
-                RT.block_on(fetch_data_with_provider(&messages, provider, model))
-            } else {
-                // Default to OpenAI if provider can't be parsed
+    let api_results = if kwargs.response_schema.is_some() {
+        // Use structured output with validation
+        let schema_opt = kwargs.response_schema.as_deref();
+        let model_name_opt = kwargs.response_model_name.as_deref();
+
+        match (&kwargs.provider, &kwargs.model) {
+            (Some(provider_str), Some(model)) => {
+                // Try to parse provider string to Provider enum
+                if let Some(provider) = parse_provider(provider_str) {
+                    RT.block_on(fetch_data_with_provider_and_schema(&messages, provider, model, schema_opt, model_name_opt))
+                } else {
+                    RT.block_on(fetch_data_with_provider_and_schema(&messages, Provider::OpenAI, model, schema_opt, model_name_opt))
+                }
+            },
+            (Some(provider_str), None) => {
+                if let Some(provider) = parse_provider(provider_str) {
+                    let default_model = get_default_model(provider);
+                    RT.block_on(fetch_data_with_provider_and_schema(&messages, provider, default_model, schema_opt, model_name_opt))
+                } else {
+                    let default_model = get_default_model(Provider::OpenAI);
+                    RT.block_on(fetch_data_with_provider_and_schema(&messages, Provider::OpenAI, default_model, schema_opt, model_name_opt))
+                }
+            },
+            (None, Some(model)) => {
+                RT.block_on(fetch_data_with_provider_and_schema(&messages, Provider::OpenAI, model, schema_opt, model_name_opt))
+            },
+            (None, None) => {
+                let default_model = get_default_model(Provider::OpenAI);
+                RT.block_on(fetch_data_with_provider_and_schema(&messages, Provider::OpenAI, default_model, schema_opt, model_name_opt))
+            },
+        }
+    } else {
+        // Use regular inference without structured output
+        match (&kwargs.provider, &kwargs.model) {
+            (Some(provider_str), Some(model)) => {
+                if let Some(provider) = parse_provider(provider_str) {
+                    RT.block_on(fetch_data_with_provider(&messages, provider, model))
+                } else {
+                    RT.block_on(fetch_data_with_provider(&messages, Provider::OpenAI, model))
+                }
+            },
+            (Some(provider_str), None) => {
+                if let Some(provider) = parse_provider(provider_str) {
+                    let default_model = get_default_model(provider);
+                    RT.block_on(fetch_data_with_provider(&messages, provider, default_model))
+                } else {
+                    RT.block_on(fetch_data(&messages))
+                }
+            },
+            (None, Some(model)) => {
                 RT.block_on(fetch_data_with_provider(&messages, Provider::OpenAI, model))
-            }
-        },
-        (Some(provider_str), None) => {
-            // Try to parse provider string to Provider enum
-            if let Some(provider) = parse_provider(provider_str) {
-                // Use provider with default model
-                let default_model = get_default_model(provider);
-                RT.block_on(fetch_data_with_provider(&messages, provider, default_model))
-            } else {
-                // Default to OpenAI if provider can't be parsed
+            },
+            (None, None) => {
                 RT.block_on(fetch_data(&messages))
-            }
-        },
-        (None, Some(model)) => {
-            // Use default provider (OpenAI) with specified model
-            RT.block_on(fetch_data_with_provider(&messages, Provider::OpenAI, model))
-        },
-        (None, None) => {
-            // Use default provider and model
-            RT.block_on(fetch_data(&messages))
-        },
+            },
+        }
     };
 
     // Map results back to original positions
@@ -178,36 +208,61 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
     let message_arrays: Vec<Vec<Message>> = arrays_with_indices.iter().map(|(_, arr)| arr.clone()).collect();
 
     // Get results based on provider and model
-    let api_results = match (&kwargs.provider, &kwargs.model) {
-        (Some(provider_str), Some(model)) => {
-            // Try to parse provider string to Provider enum
-            if let Some(provider) = parse_provider(provider_str) {
-                // Use provider and model
-                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, model))
-            } else {
-                // Default to OpenAI if provider can't be parsed
+    let api_results = if kwargs.response_schema.is_some() {
+        // Use structured output with validation
+        let schema_opt = kwargs.response_schema.as_deref();
+        let model_name_opt = kwargs.response_model_name.as_deref();
+
+        match (&kwargs.provider, &kwargs.model) {
+            (Some(provider_str), Some(model)) => {
+                if let Some(provider) = parse_provider(provider_str) {
+                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, provider, model, schema_opt, model_name_opt))
+                } else {
+                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, Provider::OpenAI, model, schema_opt, model_name_opt))
+                }
+            },
+            (Some(provider_str), None) => {
+                if let Some(provider) = parse_provider(provider_str) {
+                    let default_model = get_default_model(provider);
+                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, provider, default_model, schema_opt, model_name_opt))
+                } else {
+                    let default_model = get_default_model(Provider::OpenAI);
+                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, Provider::OpenAI, default_model, schema_opt, model_name_opt))
+                }
+            },
+            (None, Some(model)) => {
+                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, Provider::OpenAI, model, schema_opt, model_name_opt))
+            },
+            (None, None) => {
+                let default_model = get_default_model(Provider::OpenAI);
+                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, Provider::OpenAI, default_model, schema_opt, model_name_opt))
+            },
+        }
+    } else {
+        // Use regular inference without structured output
+        match (&kwargs.provider, &kwargs.model) {
+            (Some(provider_str), Some(model)) => {
+                if let Some(provider) = parse_provider(provider_str) {
+                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, model))
+                } else {
+                    RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
+                }
+            },
+            (Some(provider_str), None) => {
+                if let Some(provider) = parse_provider(provider_str) {
+                    let default_model = get_default_model(provider);
+                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, default_model))
+                } else {
+                    RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
+                }
+            },
+            (None, Some(model)) => {
+                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, Provider::OpenAI, model))
+            },
+            (None, None) => {
                 RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
-            }
-        },
-        (Some(provider_str), None) => {
-            // Try to parse provider string to Provider enum
-            if let Some(provider) = parse_provider(provider_str) {
-                // Use provider with default model
-                let default_model = get_default_model(provider);
-                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, default_model))
-            } else {
-                // Default to OpenAI if provider can't be parsed
-                RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
-            }
-        },
-        (None, Some(model)) => {
-            // Use default provider (OpenAI) with specified model
-            RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, Provider::OpenAI, model))
-        },
-        (None, None) => {
-            // Use default provider and model
-            RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
-        },
+            },
+        }
     };
 
     // Map results back to original positions

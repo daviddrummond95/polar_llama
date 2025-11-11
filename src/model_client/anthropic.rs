@@ -13,10 +13,14 @@ struct AnthropicResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct AnthropicContent {
     #[serde(rename = "type")]
     content_type: String,
     text: Option<String>,
+    id: Option<String>,
+    name: Option<String>,
+    input: Option<Value>,
 }
 
 pub struct AnthropicClient {
@@ -101,34 +105,60 @@ impl ModelClient for AnthropicClient {
         json!(formatted_messages)
     }
     
-    fn format_request_body(&self, messages: &[Message]) -> Value {
+    fn format_request_body(&self, messages: &[Message], schema: Option<&str>, model_name: Option<&str>) -> Value {
         // Extract system message if present
         let system = messages.iter()
             .find(|msg| msg.role == "system")
             .map(|msg| msg.content.clone());
-        
+
         // Format messages (excluding system)
         let formatted_messages = self.format_messages(messages);
-        
+
         // Build request with or without system parameter
         let mut request = json!({
             "model": self.model_name(),
             "messages": formatted_messages,
             "max_tokens": 1024
         });
-        
+
         // Add system parameter if we found a system message
         if let Some(system_content) = system {
             request["system"] = json!(system_content);
         }
-        
+
+        // Add structured output support using tools if schema is provided
+        if let Some(schema_str) = schema {
+            if let Ok(schema_value) = serde_json::from_str::<Value>(schema_str) {
+                request["tools"] = json!([{
+                    "name": model_name.unwrap_or("response"),
+                    "description": "Extract structured data according to the schema",
+                    "input_schema": schema_value
+                }]);
+                request["tool_choice"] = json!({
+                    "type": "tool",
+                    "name": model_name.unwrap_or("response")
+                });
+            }
+        }
+
         request
     }
     
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {
         match serde_json::from_str::<AnthropicResponse>(response_text) {
             Ok(response) => {
-                // Find the first text content
+                // Check for tool use first (structured outputs)
+                for content in &response.content {
+                    if content.content_type == "tool_use" {
+                        if let Some(input) = &content.input {
+                            // Return the tool input as JSON string
+                            return serde_json::to_string(input)
+                                .map_err(|e| ModelClientError::ParseError(format!("Failed to serialize tool input: {}", e)));
+                        }
+                    }
+                }
+
+                // Fall back to text content
                 for content in &response.content {
                     if content.content_type == "text" {
                         if let Some(text) = &content.text {
@@ -136,7 +166,7 @@ impl ModelClient for AnthropicClient {
                         }
                     }
                 }
-                Err(ModelClientError::ParseError("No text content found".to_string()))
+                Err(ModelClientError::ParseError("No text or tool_use content found".to_string()))
             },
             Err(err) => {
                 Err(ModelClientError::Serialization(err))
@@ -146,8 +176,8 @@ impl ModelClient for AnthropicClient {
     
     async fn send_request(&self, client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
         let api_key = self.get_api_key();
-        let body = serde_json::to_string(&self.format_request_body(messages))?;
-        
+        let body = serde_json::to_string(&self.format_request_body(messages, None, None))?;
+
         let response = client.post(self.api_endpoint())
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
@@ -155,10 +185,38 @@ impl ModelClient for AnthropicClient {
             .body(body)
             .send()
             .await?;
-            
+
         let status = response.status();
         let text = response.text().await?;
-        
+
+        if status.is_success() {
+            self.parse_response(&text)
+        } else {
+            Err(ModelClientError::Http(status.as_u16(), text))
+        }
+    }
+
+    async fn send_request_structured(
+        &self,
+        client: &Client,
+        messages: &[Message],
+        schema: Option<&str>,
+        model_name: Option<&str>
+    ) -> Result<String, ModelClientError> {
+        let api_key = self.get_api_key();
+        let body = serde_json::to_string(&self.format_request_body(messages, schema, model_name))?;
+
+        let response = client.post(self.api_endpoint())
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let text = response.text().await?;
+
         if status.is_success() {
             self.parse_response(&text)
         } else {
