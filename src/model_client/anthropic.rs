@@ -13,6 +13,7 @@ struct AnthropicResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct AnthropicContent {
     #[serde(rename = "type")]
     content_type: String,
@@ -151,8 +152,8 @@ impl ModelClient for AnthropicClient {
                     if content.content_type == "tool_use" {
                         if let Some(input) = &content.input {
                             // Return the tool input as JSON string
-                            return Ok(serde_json::to_string(input)
-                                .map_err(|e| ModelClientError::ParseError(format!("Failed to serialize tool input: {}", e)))?);
+                            return serde_json::to_string(input)
+                                .map_err(|e| ModelClientError::ParseError(format!("Failed to serialize tool input: {}", e)));
                         }
                     }
                 }
