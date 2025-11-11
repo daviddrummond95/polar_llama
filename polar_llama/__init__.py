@@ -248,8 +248,11 @@ def inference_async(
 
     # If track_usage is enabled, parse JSON to struct with usage fields
     if track_usage:
+        # If response_model is provided, content field is a struct; otherwise it's a string
+        content_dtype = struct_dtype if struct_dtype is not None else pl.Utf8
+
         usage_dtype = pl.Struct([
-            pl.Field("content", pl.Utf8),
+            pl.Field("content", content_dtype),
             pl.Field("prompt_tokens", pl.Int64),
             pl.Field("completion_tokens", pl.Int64),
             pl.Field("total_tokens", pl.Int64)
