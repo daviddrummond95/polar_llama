@@ -13,6 +13,7 @@ Polar Llama is a Python library designed to enhance the efficiency of making par
 - **Easy to Use**: Simplifies the process of sending queries and retrieving responses from the ChatGPT API through a clean and straightforward interface.
 - **Multi-Message Support**: Create and process conversations with multiple messages in context, supporting complex multi-turn interactions.
 - **Multiple Provider Support**: Works with OpenAI, Anthropic, Gemini, Groq, and AWS Bedrock models, giving you flexibility in your AI infrastructure.
+- **Structured Outputs**: Define response schemas using Pydantic models for type-safe, validated LLM outputs returned as Polars Structs with direct field access.
 
 #### Installation
 
@@ -130,6 +131,59 @@ df = df.with_columns(
 )
 ```
 
+#### Structured Outputs with Pydantic
+
+Polar Llama supports structured outputs using Pydantic models. Define your response schema as a Pydantic `BaseModel`, and the LLM will return validated, type-safe data as a Polars Struct:
+
+```python
+import polars as pl
+from polar_llama import inference_async, Provider
+from pydantic import BaseModel
+
+# Define your response schema
+class MovieRecommendation(BaseModel):
+    title: str
+    genre: str
+    year: int
+    reason: str
+
+# Create a dataframe
+df = pl.DataFrame({
+    'prompt': ['Recommend a great sci-fi movie from the 2010s']
+})
+
+# Get structured output
+df = df.with_columns(
+    recommendation=inference_async(
+        pl.col('prompt'),
+        provider=Provider.OPENAI,
+        model='gpt-4o-mini',
+        response_model=MovieRecommendation
+    )
+)
+
+# Access struct fields directly!
+print(df['recommendation'].struct.field('title')[0])  # "Interstellar"
+print(df['recommendation'].struct.field('year')[0])   # 2014
+```
+
+**Key Features:**
+- **Type Safety**: Responses are validated against your Pydantic schema
+- **Direct Field Access**: Use `.struct.field('field_name')` to access individual fields
+- **Error Handling**: Built-in `_error`, `_details`, and `_raw` fields for graceful error handling
+- **Works Everywhere**: Compatible with `inference_async()`, `inference()`, and `inference_messages()`
+- **Multi-Provider**: Works with OpenAI, Anthropic, Groq, Gemini, and Bedrock
+
+**Error Handling:**
+```python
+# Check for errors in responses
+error = df['recommendation'].struct.field('_error')[0]
+if error:
+    print(f"Error: {error}")
+    print(f"Details: {df['recommendation'].struct.field('_details')[0]}")
+    print(f"Raw response: {df['recommendation'].struct.field('_raw')[0]}")
+```
+
 #### Benefits
 
 - **Speed**: Processes multiple queries in parallel, drastically reducing the time required for bulk query handling.
@@ -137,6 +191,7 @@ df = df.with_columns(
 - **Ease of Integration**: Integrates seamlessly into existing Python projects that utilize Polars, making it easy to add parallel processing capabilities.
 - **Context Preservation**: Maintain conversation context with multi-message support for more natural interactions.
 - **Provider Flexibility**: Choose from multiple LLM providers based on your needs and access.
+- **Type Safety**: Get validated, structured outputs using Pydantic schemas for reliable data extraction.
 
 #### Testing
 
@@ -179,5 +234,5 @@ Polar Llama is released under the MIT license. For more details, see the LICENSE
 
 - [x] **Multi-Message Support**: Support for multi-message conversations to maintain context.
 - [x] **Multiple Provider Support**: Support for different LLM providers (OpenAI, Anthropic, Gemini, Groq, AWS Bedrock).
-- [ ] **Function Calling**: Add support for using the function calls and structured data outputs for inference requests.
+- [x] **Structured Data Outputs**: Add support for structured data outputs using Pydantic models with type validation and Polars Struct returns.
 - [ ] **Streaming Responses**: Support for streaming responses from LLM providers.
