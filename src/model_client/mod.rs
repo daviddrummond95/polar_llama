@@ -19,6 +19,29 @@ pub struct Message {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+}
+
+impl TokenUsage {
+    pub fn none() -> Self {
+        TokenUsage {
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelResponse {
+    pub content: String,
+    pub usage: TokenUsage,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum Provider {
     OpenAI,
@@ -111,6 +134,16 @@ pub trait ModelClient {
     /// Parse the API response to extract the completion text
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError>;
 
+    /// Parse the API response to extract both completion text and usage information
+    fn parse_response_with_usage(&self, response_text: &str) -> Result<ModelResponse, ModelClientError> {
+        // Default implementation: parse response and return with no usage data
+        let content = self.parse_response(response_text)?;
+        Ok(ModelResponse {
+            content,
+            usage: TokenUsage::none(),
+        })
+    }
+
     /// Send a request to the API
     async fn send_request(&self, client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
         let api_key = self.get_api_key();
@@ -156,6 +189,56 @@ pub trait ModelClient {
 
         if status.is_success() {
             self.parse_response(&text)
+        } else {
+            Err(ModelClientError::Http(status.as_u16(), text))
+        }
+    }
+
+    /// Send a request and return both content and usage information
+    async fn send_request_with_usage(&self, client: &Client, messages: &[Message]) -> Result<ModelResponse, ModelClientError> {
+        let api_key = self.get_api_key();
+        let body = serde_json::to_string(&self.format_request_body(messages, None, None))?;
+
+        let response = client.post(self.api_endpoint())
+            .bearer_auth(api_key)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let text = response.text().await?;
+
+        if status.is_success() {
+            self.parse_response_with_usage(&text)
+        } else {
+            Err(ModelClientError::Http(status.as_u16(), text))
+        }
+    }
+
+    /// Send a request with structured output support and usage tracking
+    async fn send_request_structured_with_usage(
+        &self,
+        client: &Client,
+        messages: &[Message],
+        schema: Option<&str>,
+        model_name: Option<&str>
+    ) -> Result<ModelResponse, ModelClientError> {
+        let api_key = self.get_api_key();
+        let body = serde_json::to_string(&self.format_request_body(messages, schema, model_name))?;
+
+        let response = client.post(self.api_endpoint())
+            .bearer_auth(api_key)
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let text = response.text().await?;
+
+        if status.is_success() {
+            self.parse_response_with_usage(&text)
         } else {
             Err(ModelClientError::Http(status.as_u16(), text))
         }
@@ -431,14 +514,186 @@ pub async fn fetch_data_generic_enhanced_with_schema<T: ModelClient + Sync + ?Si
     futures::future::join_all(fetch_tasks).await
 }
 
+/// Fetch data with usage tracking
+pub async fn fetch_data_generic_with_usage<T: ModelClient + Sync + ?Sized>(
+    client: &T,
+    messages: &[String]
+) -> Vec<Option<ModelResponse>> {
+    let reqwest_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    let fetch_tasks = messages.iter().map(|content| {
+        let formatted_message = Message {
+            role: "user".to_string(),
+            content: content.clone(),
+        };
+        let messages = vec![formatted_message];
+        let reqwest_client = &reqwest_client;
+
+        async move {
+            match client.send_request_with_usage(reqwest_client, &messages).await {
+                Ok(response) => Some(response),
+                Err(e) => {
+                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
+                    None
+                }
+            }
+        }
+    }).collect::<Vec<_>>();
+
+    futures::future::join_all(fetch_tasks).await
+}
+
+/// Fetch data with schema validation and usage tracking
+pub async fn fetch_data_generic_with_schema_and_usage<T: ModelClient + Sync + ?Sized>(
+    client: &T,
+    messages: &[String],
+    schema: Option<&str>,
+    model_name: Option<&str>
+) -> Vec<Option<ModelResponse>> {
+    let reqwest_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    let fetch_tasks = messages.iter().map(|content| {
+        let formatted_message = Message {
+            role: "user".to_string(),
+            content: content.clone(),
+        };
+        let messages = vec![formatted_message];
+        let reqwest_client = &reqwest_client;
+        let schema_owned = schema.map(|s| s.to_string());
+        let model_name_owned = model_name.map(|s| s.to_string());
+
+        async move {
+            match client.send_request_structured_with_usage(
+                reqwest_client,
+                &messages,
+                schema_owned.as_deref(),
+                model_name_owned.as_deref()
+            ).await {
+                Ok(mut response) => {
+                    // Validate if schema is provided
+                    if let Some(schema_str) = schema_owned.as_deref() {
+                        match validate_json_schema(&response.content, schema_str) {
+                            Ok(_) => Some(response),
+                            Err(validation_error) => {
+                                // Replace content with error response
+                                response.content = create_error_response("validation_failed", &validation_error, Some(&response.content));
+                                Some(response)
+                            }
+                        }
+                    } else {
+                        Some(response)
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
+                    // Return error response with no usage data
+                    Some(ModelResponse {
+                        content: create_error_response("api_error", &e.to_string(), None),
+                        usage: TokenUsage::none(),
+                    })
+                }
+            }
+        }
+    }).collect::<Vec<_>>();
+
+    futures::future::join_all(fetch_tasks).await
+}
+
+/// Enhanced function with usage tracking for message arrays
+pub async fn fetch_data_generic_enhanced_with_usage<T: ModelClient + Sync + ?Sized>(
+    client: &T,
+    message_arrays: &[Vec<Message>]
+) -> Vec<Option<ModelResponse>> {
+    let reqwest_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    let fetch_tasks = message_arrays.iter().map(|messages| {
+        let messages = messages.clone();
+        let reqwest_client = &reqwest_client;
+
+        async move {
+            match client.send_request_with_usage(reqwest_client, &messages).await {
+                Ok(response) => Some(response),
+                Err(e) => {
+                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
+                    None
+                }
+            }
+        }
+    }).collect::<Vec<_>>();
+
+    futures::future::join_all(fetch_tasks).await
+}
+
+/// Enhanced function with schema validation and usage tracking for message arrays
+pub async fn fetch_data_generic_enhanced_with_schema_and_usage<T: ModelClient + Sync + ?Sized>(
+    client: &T,
+    message_arrays: &[Vec<Message>],
+    schema: Option<&str>,
+    model_name: Option<&str>
+) -> Vec<Option<ModelResponse>> {
+    let reqwest_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    let fetch_tasks = message_arrays.iter().map(|messages| {
+        let messages = messages.clone();
+        let reqwest_client = &reqwest_client;
+        let schema_owned = schema.map(|s| s.to_string());
+        let model_name_owned = model_name.map(|s| s.to_string());
+
+        async move {
+            match client.send_request_structured_with_usage(
+                reqwest_client,
+                &messages,
+                schema_owned.as_deref(),
+                model_name_owned.as_deref()
+            ).await {
+                Ok(mut response) => {
+                    // Validate if schema is provided
+                    if let Some(schema_str) = schema_owned.as_deref() {
+                        match validate_json_schema(&response.content, schema_str) {
+                            Ok(_) => Some(response),
+                            Err(validation_error) => {
+                                response.content = create_error_response("validation_failed", &validation_error, Some(&response.content));
+                                Some(response)
+                            }
+                        }
+                    } else {
+                        Some(response)
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
+                    Some(ModelResponse {
+                        content: create_error_response("api_error", &e.to_string(), None),
+                        usage: TokenUsage::none(),
+                    })
+                }
+            }
+        }
+    }).collect::<Vec<_>>();
+
+    futures::future::join_all(fetch_tasks).await
+}
+
 /// Example function showing how to use the different model clients with specific models
 pub async fn example_usage(messages: &[String], provider_str: &str, model: &str) -> Vec<Option<String>> {
     // Parse provider string to Provider enum
     let provider = Provider::from_str(provider_str).unwrap_or(Provider::OpenAI);
-    
+
     // Create appropriate client with specified model
     let client = create_client(provider, model);
-    
+
     // Use client with generic fetch function
     fetch_data_generic(&*client, messages).await
 }

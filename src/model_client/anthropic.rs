@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
-use super::{ModelClient, ModelClientError, Message, Provider};
+use super::{ModelClient, ModelClientError, Message, Provider, ModelResponse, TokenUsage};
 use serde::Deserialize;
 use reqwest::Client;
 
@@ -10,6 +10,14 @@ struct AnthropicResponse {
     id: String,
     model: String,
     content: Vec<AnthropicContent>,
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct AnthropicUsage {
+    input_tokens: i32,
+    output_tokens: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,6 +175,61 @@ impl ModelClient for AnthropicClient {
                     }
                 }
                 Err(ModelClientError::ParseError("No text or tool_use content found".to_string()))
+            },
+            Err(err) => {
+                Err(ModelClientError::Serialization(err))
+            }
+        }
+    }
+
+    fn parse_response_with_usage(&self, response_text: &str) -> Result<ModelResponse, ModelClientError> {
+        match serde_json::from_str::<AnthropicResponse>(response_text) {
+            Ok(response) => {
+                // Extract content (same logic as parse_response)
+                let mut content = String::new();
+
+                // Check for tool use first (structured outputs)
+                for content_item in &response.content {
+                    if content_item.content_type == "tool_use" {
+                        if let Some(input) = &content_item.input {
+                            content = serde_json::to_string(input)
+                                .map_err(|e| ModelClientError::ParseError(format!("Failed to serialize tool input: {}", e)))?;
+                            break;
+                        }
+                    }
+                }
+
+                // Fall back to text content
+                if content.is_empty() {
+                    for content_item in &response.content {
+                        if content_item.content_type == "text" {
+                            if let Some(text) = &content_item.text {
+                                content = text.clone();
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if content.is_empty() {
+                    return Err(ModelClientError::ParseError("No text or tool_use content found".to_string()));
+                }
+
+                // Extract usage information
+                let usage = if let Some(usage_data) = &response.usage {
+                    TokenUsage {
+                        prompt_tokens: Some(usage_data.input_tokens as i64),
+                        completion_tokens: Some(usage_data.output_tokens as i64),
+                        total_tokens: Some((usage_data.input_tokens + usage_data.output_tokens) as i64),
+                    }
+                } else {
+                    TokenUsage::none()
+                };
+
+                Ok(ModelResponse {
+                    content,
+                    usage,
+                })
             },
             Err(err) => {
                 Err(ModelClientError::Serialization(err))

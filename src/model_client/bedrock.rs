@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
-use super::{ModelClient, ModelClientError, Message, Provider};
+use super::{ModelClient, ModelClientError, Message, Provider, ModelResponse, TokenUsage};
 use reqwest::Client;
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::{
@@ -141,23 +141,23 @@ impl ModelClient for BedrockClient {
         let mut bedrock_client_ref = self.clone();
         let bedrock_client = bedrock_client_ref.get_bedrock_client().await
             .map_err(|e| ModelClientError::ParseError(format!("Failed to create Bedrock client: {e}")))?;
-        
+
         let (system_prompt, bedrock_messages) = self.convert_messages_to_bedrock(messages);
-        
+
         let mut converse_request = bedrock_client
             .converse()
             .model_id(&self.model)
             .set_messages(Some(bedrock_messages));
-        
+
         if let Some(system) = system_prompt {
             converse_request = converse_request.system(system);
         }
-        
+
         let response = converse_request
             .send()
             .await
             .map_err(|e| ModelClientError::ParseError(format!("Bedrock API error: {e}")))?;
-        
+
         // Extract the response text
         if let Some(output) = response.output {
             if output.is_message() {
@@ -172,8 +172,73 @@ impl ModelClient for BedrockClient {
                 }
             }
         }
-        
+
         Err(ModelClientError::ParseError("No text content found in Bedrock response".to_string()))
+    }
+
+    async fn send_request_with_usage(&self, _client: &Client, messages: &[Message]) -> Result<ModelResponse, ModelClientError> {
+        // We don't use the reqwest client for Bedrock, we use the AWS SDK
+        let mut bedrock_client_ref = self.clone();
+        let bedrock_client = bedrock_client_ref.get_bedrock_client().await
+            .map_err(|e| ModelClientError::ParseError(format!("Failed to create Bedrock client: {e}")))?;
+
+        let (system_prompt, bedrock_messages) = self.convert_messages_to_bedrock(messages);
+
+        let mut converse_request = bedrock_client
+            .converse()
+            .model_id(&self.model)
+            .set_messages(Some(bedrock_messages));
+
+        if let Some(system) = system_prompt {
+            converse_request = converse_request.system(system);
+        }
+
+        let response = converse_request
+            .send()
+            .await
+            .map_err(|e| ModelClientError::ParseError(format!("Bedrock API error: {e}")))?;
+
+        // Extract usage information
+        let usage = if let Some(usage_data) = response.usage {
+            TokenUsage {
+                prompt_tokens: Some(usage_data.input_tokens() as i64),
+                completion_tokens: Some(usage_data.output_tokens() as i64),
+                total_tokens: Some((usage_data.input_tokens() + usage_data.output_tokens()) as i64),
+            }
+        } else {
+            TokenUsage::none()
+        };
+
+        // Extract the response text
+        if let Some(output) = response.output {
+            if output.is_message() {
+                if let Ok(message) = output.as_message() {
+                    for content in &message.content {
+                        if content.is_text() {
+                            if let Ok(text) = content.as_text() {
+                                return Ok(ModelResponse {
+                                    content: text.clone(),
+                                    usage,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(ModelClientError::ParseError("No text content found in Bedrock response".to_string()))
+    }
+
+    async fn send_request_structured_with_usage(
+        &self,
+        client: &Client,
+        messages: &[Message],
+        _schema: Option<&str>,
+        _model_name: Option<&str>
+    ) -> Result<ModelResponse, ModelClientError> {
+        // Bedrock doesn't have native structured output support yet, so we just call send_request_with_usage
+        self.send_request_with_usage(client, messages).await
     }
     
     fn get_api_key(&self) -> String {

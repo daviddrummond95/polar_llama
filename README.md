@@ -14,6 +14,7 @@ Polar Llama is a Python library designed to enhance the efficiency of making par
 - **Multi-Message Support**: Create and process conversations with multiple messages in context, supporting complex multi-turn interactions.
 - **Multiple Provider Support**: Works with OpenAI, Anthropic, Gemini, Groq, and AWS Bedrock models, giving you flexibility in your AI infrastructure.
 - **Structured Outputs**: Define response schemas using Pydantic models for type-safe, validated LLM outputs returned as Polars Structs with direct field access.
+- **Token Usage Tracking**: Monitor token consumption for cost tracking and optimization with automatic field additions for prompt_tokens, completion_tokens, and total_tokens.
 
 #### Installation
 
@@ -183,6 +184,64 @@ if error:
     print(f"Details: {df['recommendation'].struct.field('_details')[0]}")
     print(f"Raw response: {df['recommendation'].struct.field('_raw')[0]}")
 ```
+
+#### Token Usage Tracking
+
+Track token consumption for cost monitoring and optimization. Enable `track_usage=True` to get detailed token counts with your responses:
+
+```python
+import polars as pl
+from polar_llama import inference_async, Provider
+
+df = pl.DataFrame({
+    'prompt': ['What is the capital of France?']
+})
+
+# Enable token usage tracking
+df = df.with_columns(
+    response=inference_async(
+        pl.col('prompt'),
+        provider=Provider.OPENAI,
+        model='gpt-4o-mini',
+        track_usage=True  # Returns a Struct with content and usage fields
+    )
+)
+
+# Access the response and usage statistics
+print(df['response'].struct.field('content')[0])           # "The capital of France is Paris."
+print(df['response'].struct.field('prompt_tokens')[0])     # 12
+print(df['response'].struct.field('completion_tokens')[0]) # 8
+print(df['response'].struct.field('total_tokens')[0])      # 20
+```
+
+**Cost Calculation Example:**
+```python
+# Calculate costs based on token usage
+INPUT_PRICE_PER_1M = 0.150   # $0.150 per 1M input tokens (gpt-4o-mini)
+OUTPUT_PRICE_PER_1M = 0.600  # $0.600 per 1M output tokens
+
+df = df.with_columns([
+    pl.col('response').struct.field('content').alias('content'),
+    pl.col('response').struct.field('prompt_tokens').alias('prompt_tokens'),
+    pl.col('response').struct.field('completion_tokens').alias('completion_tokens'),
+    pl.col('response').struct.field('total_tokens').alias('total_tokens'),
+]).with_columns(
+    cost_usd=(
+        (pl.col('prompt_tokens') * INPUT_PRICE_PER_1M / 1_000_000) +
+        (pl.col('completion_tokens') * OUTPUT_PRICE_PER_1M / 1_000_000)
+    )
+)
+
+# Calculate total cost across all requests
+total_cost = df['cost_usd'].sum()
+print(f"Total cost: ${total_cost:.4f}")
+```
+
+**Key Features:**
+- **Provider Support**: Works with OpenAI, Anthropic, Groq, Gemini, and Bedrock
+- **Automatic Field Addition**: Returns a Struct with `content`, `prompt_tokens`, `completion_tokens`, and `total_tokens`
+- **Cost Optimization**: Monitor and optimize API usage costs
+- **Batch Analysis**: Aggregate usage statistics across multiple requests
 
 #### Benefits
 

@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
-use super::{ModelClient, ModelClientError, Message, Provider};
+use super::{ModelClient, ModelClientError, Message, Provider, ModelResponse, TokenUsage};
 use serde::Deserialize;
 use reqwest::Client;
 
@@ -134,6 +134,28 @@ impl ModelClient for GroqClient {
             Ok(completion) => {
                 if let Some(choice) = completion.choices.first() {
                     Ok(choice.message.content.clone())
+                } else {
+                    Err(ModelClientError::ParseError("No response content".to_string()))
+                }
+            },
+            Err(err) => {
+                Err(ModelClientError::Serialization(err))
+            }
+        }
+    }
+
+    fn parse_response_with_usage(&self, response_text: &str) -> Result<ModelResponse, ModelClientError> {
+        match serde_json::from_str::<GroqCompletion>(response_text) {
+            Ok(completion) => {
+                if let Some(choice) = completion.choices.first() {
+                    Ok(ModelResponse {
+                        content: choice.message.content.clone(),
+                        usage: TokenUsage {
+                            prompt_tokens: Some(completion.usage.prompt_tokens as i64),
+                            completion_tokens: Some(completion.usage.completion_tokens as i64),
+                            total_tokens: Some(completion.usage.total_tokens as i64),
+                        },
+                    })
                 } else {
                     Err(ModelClientError::ParseError("No response content".to_string()))
                 }

@@ -1,12 +1,25 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
-use super::{ModelClient, ModelClientError, Message, Provider};
+use super::{ModelClient, ModelClientError, Message, Provider, ModelResponse, TokenUsage};
 use serde::Deserialize;
 use reqwest::Client;
 
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
     candidates: Vec<GeminiCandidate>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<GeminiUsageMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct GeminiUsageMetadata {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: Option<i32>,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: Option<i32>,
+    #[serde(rename = "totalTokenCount")]
+    total_token_count: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,6 +159,42 @@ impl ModelClient for GeminiClient {
                     }
                 }
                 Err(ModelClientError::ParseError("No response content".to_string()))
+            },
+            Err(err) => {
+                Err(ModelClientError::Serialization(err))
+            }
+        }
+    }
+
+    fn parse_response_with_usage(&self, response_text: &str) -> Result<ModelResponse, ModelClientError> {
+        match serde_json::from_str::<GeminiResponse>(response_text) {
+            Ok(response) => {
+                // Extract content
+                let content = if let Some(candidate) = response.candidates.first() {
+                    if let Some(part) = candidate.content.parts.first() {
+                        part.text.clone()
+                    } else {
+                        return Err(ModelClientError::ParseError("No response content".to_string()));
+                    }
+                } else {
+                    return Err(ModelClientError::ParseError("No response content".to_string()));
+                };
+
+                // Extract usage information
+                let usage = if let Some(usage_meta) = &response.usage_metadata {
+                    TokenUsage {
+                        prompt_tokens: usage_meta.prompt_token_count.map(|v| v as i64),
+                        completion_tokens: usage_meta.candidates_token_count.map(|v| v as i64),
+                        total_tokens: usage_meta.total_token_count.map(|v| v as i64),
+                    }
+                } else {
+                    TokenUsage::none()
+                };
+
+                Ok(ModelResponse {
+                    content,
+                    usage,
+                })
             },
             Err(err) => {
                 Err(ModelClientError::Serialization(err))

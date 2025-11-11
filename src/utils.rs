@@ -1,6 +1,6 @@
 use polars::prelude::*;
 use serde_json::json;
-use crate::model_client::{self, Provider, create_client, Message, ModelClientError};
+use crate::model_client::{self, Provider, create_client, Message, ModelClientError, ModelResponse};
 
 // Remove duplicate error type - use ModelClientError from model_client instead
 pub type FetchError = ModelClientError;
@@ -278,4 +278,46 @@ pub async fn fetch_data_message_arrays_with_provider_and_schema(
 ) -> Vec<Option<String>> {
     let client = create_client(provider, model);
     model_client::fetch_data_generic_enhanced_with_schema(&*client, message_arrays, schema, model_name).await
+}
+
+// New functions with usage tracking
+
+pub async fn fetch_data_with_provider_and_usage(
+    messages: &[String],
+    provider: Provider,
+    model: &str
+) -> Vec<Option<ModelResponse>> {
+    let client = create_client(provider, model);
+    model_client::fetch_data_generic_with_usage(&*client, messages).await
+}
+
+pub async fn fetch_data_with_provider_schema_and_usage(
+    messages: &[String],
+    provider: Provider,
+    model: &str,
+    schema: Option<&str>,
+    model_name: Option<&str>
+) -> Vec<Option<ModelResponse>> {
+    let client = create_client(provider, model);
+    model_client::fetch_data_generic_with_schema_and_usage(&*client, messages, schema, model_name).await
+}
+
+pub async fn fetch_data_message_arrays_with_provider_and_usage(
+    message_arrays: &[Vec<Message>],
+    provider: Provider,
+    model: &str
+) -> Vec<Option<ModelResponse>> {
+    let client = create_client(provider, model);
+    model_client::fetch_data_generic_enhanced_with_usage(&*client, message_arrays).await
+}
+
+pub async fn fetch_data_message_arrays_with_provider_schema_and_usage(
+    message_arrays: &[Vec<Message>],
+    provider: Provider,
+    model: &str,
+    schema: Option<&str>,
+    model_name: Option<&str>
+) -> Vec<Option<ModelResponse>> {
+    let client = create_client(provider, model);
+    model_client::fetch_data_generic_enhanced_with_schema_and_usage(&*client, message_arrays, schema, model_name).await
 }

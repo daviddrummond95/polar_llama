@@ -138,12 +138,57 @@ def _parse_json_to_struct(json_str_series: pl.Series, dtype: pl.DataType) -> pl.
         # If parsing fails, return the series as-is (will contain error objects)
         return json_str_series.str.json_decode()
 
+def _parse_usage_json_to_struct(json_str_series: pl.Series, content_struct_dtype: Optional[pl.DataType]) -> pl.Series:
+    """Parse JSON string series containing ModelResponse to struct series with usage fields."""
+    # Parse the JSON string containing {content, usage: {prompt_tokens, completion_tokens, total_tokens}}
+    try:
+        # Parse JSON
+        parsed = json_str_series.str.json_decode()
+
+        # Extract fields
+        content = parsed.struct.field("content")
+        usage = parsed.struct.field("usage")
+
+        # If content_struct_dtype is provided, parse content as JSON struct
+        if content_struct_dtype is not None:
+            content = content.str.json_decode(dtype=content_struct_dtype)
+
+        # Extract usage fields
+        prompt_tokens = usage.struct.field("prompt_tokens")
+        completion_tokens = usage.struct.field("completion_tokens")
+        total_tokens = usage.struct.field("total_tokens")
+
+        # Create struct with all fields
+        result_df = pl.DataFrame({
+            "content": content,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens
+        })
+
+        return result_df.to_struct(name=json_str_series.name)
+    except Exception as e:
+        # If parsing fails, return struct with nulls
+        import warnings
+        warnings.warn(f"Failed to parse usage JSON: {e}")
+        return pl.Series(
+            json_str_series.name,
+            [None] * len(json_str_series),
+            dtype=pl.Struct([
+                pl.Field("content", pl.Utf8),
+                pl.Field("prompt_tokens", pl.Int64),
+                pl.Field("completion_tokens", pl.Int64),
+                pl.Field("total_tokens", pl.Int64)
+            ])
+        )
+
 def inference_async(
     expr: IntoExpr,
     *,
     provider: Optional[Union[str, Provider]] = None,
     model: Optional[str] = None,
-    response_model: Optional[Type['BaseModel']] = None
+    response_model: Optional[Type['BaseModel']] = None,
+    track_usage: bool = False
 ) -> pl.Expr:
     """
     Asynchronously infer completions for the given text expressions using an LLM.
@@ -160,12 +205,15 @@ def inference_async(
         A Pydantic model class to define structured output schema.
         The LLM response will be validated against this schema.
         Returns a Struct with fields matching the Pydantic model.
+    track_usage : bool, optional (default=False)
+        If True, returns a Struct with content and token usage fields
+        (prompt_tokens, completion_tokens, total_tokens)
 
     Returns
     -------
     polars.Expr
-        Expression with inferred completions as a Struct (if response_model provided)
-        or String (if no response_model)
+        Expression with inferred completions as a Struct (if response_model or track_usage provided)
+        or String (if neither response_model nor track_usage)
     """
     expr = parse_into_expr(expr)
     kwargs = {}
@@ -178,6 +226,8 @@ def inference_async(
 
     if model is not None:
         kwargs["model"] = model
+
+    kwargs["track_usage"] = track_usage
 
     struct_dtype = None
     if response_model is not None:
@@ -196,9 +246,21 @@ def inference_async(
         kwargs=kwargs,
     )
 
+    # If track_usage is enabled, parse JSON to struct with usage fields
+    if track_usage:
+        usage_dtype = pl.Struct([
+            pl.Field("content", pl.Utf8),
+            pl.Field("prompt_tokens", pl.Int64),
+            pl.Field("completion_tokens", pl.Int64),
+            pl.Field("total_tokens", pl.Int64)
+        ])
+
+        result_expr = result_expr.map_batches(
+            lambda s: _parse_usage_json_to_struct(s, struct_dtype),
+            return_dtype=usage_dtype
+        )
     # If response_model was provided, convert JSON strings to structs
-    if struct_dtype is not None:
-        # Use map_batches to convert the JSON string series to struct series
+    elif struct_dtype is not None:
         result_expr = result_expr.map_batches(
             lambda s: _parse_json_to_struct(s, struct_dtype),
             return_dtype=struct_dtype
