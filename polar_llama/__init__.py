@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Union, Type
+from typing import TYPE_CHECKING, Optional, Union, Type, Dict, Any
 import json
 
 import polars as pl
@@ -137,6 +137,112 @@ def _parse_json_to_struct(json_str_series: pl.Series, dtype: pl.DataType) -> pl.
     except Exception:
         # If parsing fails, return the series as-is (will contain error objects)
         return json_str_series.str.json_decode()
+
+
+# ============================================================================
+# Taxonomy-based Tagging
+# ============================================================================
+
+def _create_taxonomy_pydantic_model(taxonomy: Dict[str, Dict[str, Any]]) -> Type['BaseModel']:
+    """
+    Create a Pydantic model from a taxonomy definition.
+
+    The taxonomy should be a dict with the following structure:
+    {
+        "field_name": {
+            "description": "Description of the field",
+            "values": {
+                "value1": "Definition of value1",
+                "value2": "Definition of value2",
+                ...
+            }
+        },
+        ...
+    }
+
+    Each field in the output model will be a struct containing:
+    - thinking: Dict[str, str] - reasoning for each possible value
+    - reflection: str - overall reflection on the field analysis
+    - value: str - the selected value
+    - confidence: float - confidence in the selection (0.0 to 1.0)
+    """
+    try:
+        from pydantic import BaseModel, Field, create_model
+        from typing import Dict
+
+        # Create a field result model for each taxonomy field
+        field_models = {}
+
+        for field_name, field_config in taxonomy.items():
+            values = field_config.get("values", {})
+            value_names = list(values.keys())
+
+            # Create the field result model with dynamic thinking keys
+            field_result_model = create_model(
+                f"{field_name.title()}Result",
+                thinking=(Dict[str, str], Field(..., description=f"Reasoning for each possible value: {', '.join(value_names)}")),
+                reflection=(str, Field(..., description="Overall reflection on your analysis of this field")),
+                value=(str, Field(..., description=f"Selected value from: {', '.join(value_names)}")),
+                confidence=(float, Field(..., ge=0.0, le=1.0, description="Confidence in the selected value (0.0 to 1.0)"))
+            )
+
+            field_models[field_name] = (field_result_model, Field(..., description=field_config.get("description", "")))
+
+        # Create the main taxonomy result model
+        TaxonomyResult = create_model("TaxonomyResult", **field_models)
+
+        return TaxonomyResult
+
+    except ImportError:
+        raise ImportError("Pydantic is required for taxonomy tagging. Install with: pip install pydantic>=2.0.0")
+
+
+def _create_taxonomy_prompt(taxonomy: Dict[str, Dict[str, Any]], document_field_name: str = "document") -> str:
+    """
+    Create a system prompt for taxonomy-based tagging.
+
+    This prompt instructs the model to analyze a document according to the
+    provided taxonomy and return structured tags with reasoning.
+    """
+    prompt_parts = [
+        f"You are an expert document analyst. Analyze the provided {document_field_name} and tag it according to the following taxonomy.",
+        "",
+        "# Taxonomy Fields",
+        ""
+    ]
+
+    for field_name, field_config in taxonomy.items():
+        description = field_config.get("description", "")
+        values = field_config.get("values", {})
+
+        prompt_parts.append(f"## {field_name}")
+        if description:
+            prompt_parts.append(f"{description}")
+        prompt_parts.append("")
+        prompt_parts.append("Possible values:")
+
+        for value_name, value_definition in values.items():
+            prompt_parts.append(f"- **{value_name}**: {value_definition}")
+
+        prompt_parts.append("")
+
+    prompt_parts.extend([
+        "# Instructions",
+        "",
+        "For each field in the taxonomy:",
+        "",
+        "1. **Thinking**: Consider each possible value and write your reasoning for why it might or might not apply to the document. Provide one reasoning string for each possible value.",
+        "",
+        "2. **Reflection**: After thinking through all values, reflect on your analysis. Consider which value best fits the document and why.",
+        "",
+        "3. **Value**: Select the single best value from the possible values for this field.",
+        "",
+        "4. **Confidence**: Provide your confidence in this selection as a number between 0.0 (not confident) and 1.0 (very confident).",
+        "",
+        "Return your analysis in the structured format with all required fields."
+    ])
+
+    return "\n".join(prompt_parts)
 
 def inference_async(
     expr: IntoExpr,
@@ -387,25 +493,157 @@ def string_to_message(expr: IntoExpr, *, message_type: str) -> pl.Expr:
 def combine_messages(*exprs: IntoExpr) -> pl.Expr:
     """
     Combine multiple message expressions into a single message array.
-    
+
     This function takes multiple message expressions (strings containing JSON formatted messages)
     and combines them into a single JSON array of messages, preserving the order.
-    
+
     Parameters
     ----------
     *exprs : polars.Expr
         One or more expressions containing messages to combine
-        
+
     Returns
     -------
     polars.Expr
         Expression with combined message arrays
     """
     args = [parse_into_expr(expr) for expr in exprs]
-    
+
     return register_plugin(
         args=args,
         symbol="combine_messages",
         is_elementwise=True,
         lib=lib,
+    )
+
+
+def tag_taxonomy(
+    expr: IntoExpr,
+    taxonomy: Dict[str, Dict[str, Any]],
+    *,
+    provider: Optional[Union[str, Provider]] = None,
+    model: Optional[str] = None,
+) -> pl.Expr:
+    """
+    Tag documents according to a taxonomy definition with detailed reasoning.
+
+    This function analyzes documents and assigns tags based on a predefined taxonomy,
+    providing detailed reasoning for each classification decision. The taxonomy allows
+    you to define fields (categories), their possible values, and definitions for each value.
+
+    For each taxonomy field, the model will:
+    1. Think through each possible value with reasoning
+    2. Reflect on the overall analysis
+    3. Select the best value
+    4. Provide a confidence score
+
+    Parameters
+    ----------
+    expr : polars.Expr
+        The document expression to analyze and tag
+    taxonomy : Dict[str, Dict[str, Any]]
+        A dictionary defining the taxonomy structure:
+        {
+            "field_name": {
+                "description": "Description of what this field represents",
+                "values": {
+                    "value1": "Definition of value1",
+                    "value2": "Definition of value2",
+                    ...
+                }
+            },
+            ...
+        }
+    provider : str or Provider, optional
+        The LLM provider to use (OpenAI, Anthropic, Gemini, Groq, Bedrock)
+    model : str, optional
+        The specific model name to use
+
+    Returns
+    -------
+    polars.Expr
+        Expression with structured tags as a Struct. Each taxonomy field becomes
+        a nested struct containing:
+        - thinking: Dict[str, str] - reasoning for each possible value
+        - reflection: str - overall reflection on the field analysis
+        - value: str - the selected value
+        - confidence: float - confidence score (0.0 to 1.0)
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from polar_llama import tag_taxonomy, Provider
+    >>>
+    >>> # Define a taxonomy
+    >>> taxonomy = {
+    ...     "sentiment": {
+    ...         "description": "The emotional tone of the text",
+    ...         "values": {
+    ...             "positive": "Text expresses positive emotions, optimism, or favorable opinions",
+    ...             "negative": "Text expresses negative emotions, pessimism, or unfavorable opinions",
+    ...             "neutral": "Text is factual and objective without clear emotional content"
+    ...         }
+    ...     },
+    ...     "urgency": {
+    ...         "description": "How urgent or time-sensitive the content is",
+    ...         "values": {
+    ...             "high": "Requires immediate attention or action",
+    ...             "medium": "Should be addressed soon but not immediately critical",
+    ...             "low": "Can be addressed at any convenient time"
+    ...         }
+    ...     }
+    ... }
+    >>>
+    >>> # Create a dataframe with documents
+    >>> df = pl.DataFrame({
+    ...     "id": [1, 2],
+    ...     "document": [
+    ...         "URGENT: The server is down and customers can't access the site!",
+    ...         "Our quarterly results exceeded expectations. Great work team!"
+    ...     ]
+    ... })
+    >>>
+    >>> # Apply taxonomy tagging
+    >>> result = df.with_columns(
+    ...     tags=tag_taxonomy(
+    ...         pl.col("document"),
+    ...         taxonomy,
+    ...         provider=Provider.OPENAI,
+    ...         model="gpt-4"
+    ...     )
+    ... )
+    >>>
+    >>> # Access specific fields and values
+    >>> result.select([
+    ...     "document",
+    ...     pl.col("tags").struct.field("sentiment").struct.field("value").alias("sentiment"),
+    ...     pl.col("tags").struct.field("sentiment").struct.field("confidence").alias("sentiment_conf"),
+    ...     pl.col("tags").struct.field("urgency").struct.field("value").alias("urgency")
+    ... ])
+    """
+    # Create the Pydantic model from the taxonomy
+    response_model = _create_taxonomy_pydantic_model(taxonomy)
+
+    # Create the system prompt with taxonomy instructions
+    system_prompt = _create_taxonomy_prompt(taxonomy, document_field_name="document")
+
+    # Create a system message with the taxonomy instructions
+    system_message_expr = pl.lit(system_prompt).pipe(
+        string_to_message, message_type="system"
+    )
+
+    # Create a user message with the document
+    user_message_expr = parse_into_expr(expr).pipe(
+        string_to_message, message_type="user"
+    )
+
+    # Combine the messages
+    messages_expr = combine_messages(system_message_expr, user_message_expr)
+
+    # Call inference_messages with the structured output model
+    return inference_messages(
+        messages_expr,
+        provider=provider,
+        model=model,
+        response_model=response_model
     )
