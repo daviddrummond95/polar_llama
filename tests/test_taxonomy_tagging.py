@@ -10,8 +10,8 @@ load_dotenv()
 def test_taxonomy_tagging_basic():
     """Test basic taxonomy tagging with a simple two-field taxonomy."""
     # Check if API key is available
-    if not os.getenv("GROQ_API_KEY"):
-        print("Skipping test: GROQ_API_KEY not set")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("Skipping test: ANTHROPIC_API_KEY not set")
         return
 
     # Define a simple taxonomy
@@ -45,8 +45,8 @@ def test_taxonomy_tagging_basic():
         tags=tag_taxonomy(
             pl.col("document"),
             taxonomy,
-            provider=Provider.GROQ,
-            model="openai/gpt-oss-120b"
+            provider=Provider.ANTHROPIC,
+            model="claude-sonnet-4-5-20250929"
         )
     )
 
@@ -97,8 +97,8 @@ def test_taxonomy_tagging_basic():
 
 def test_taxonomy_tagging_multiple_rows():
     """Test taxonomy tagging with multiple documents in parallel."""
-    if not os.getenv("GROQ_API_KEY"):
-        print("Skipping test: GROQ_API_KEY not set")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("Skipping test: ANTHROPIC_API_KEY not set")
         return
 
     # Define taxonomy
@@ -136,8 +136,8 @@ def test_taxonomy_tagging_multiple_rows():
         tags=tag_taxonomy(
             pl.col("document"),
             taxonomy,
-            provider=Provider.GROQ,
-            model="openai/gpt-oss-120b"
+            provider=Provider.ANTHROPIC,
+            model="claude-sonnet-4-5-20250929"
         )
     )
 
@@ -174,8 +174,8 @@ def test_taxonomy_tagging_multiple_rows():
 
 def test_taxonomy_tagging_complex():
     """Test taxonomy tagging with a more complex multi-value taxonomy."""
-    if not os.getenv("GROQ_API_KEY"):
-        print("Skipping test: GROQ_API_KEY not set")
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        print("Skipping test: ANTHROPIC_API_KEY not set")
         return
 
     # Define a more complex taxonomy with more fields and values
@@ -225,8 +225,8 @@ def test_taxonomy_tagging_complex():
         tags=tag_taxonomy(
             pl.col("document"),
             taxonomy,
-            provider=Provider.GROQ,
-            model="openai/gpt-oss-120b"
+            provider=Provider.ANTHROPIC,
+            model="claude-sonnet-4-5-20250929"
         )
     )
 

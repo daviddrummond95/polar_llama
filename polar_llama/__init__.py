@@ -62,9 +62,12 @@ def _pydantic_to_json_schema(model: Type['BaseModel']) -> dict:
 
         # Recursively add additionalProperties: false to all objects
         # This is required by some providers like Groq
+        # However, we skip objects that already have additionalProperties defined
+        # (like Dict[str, str] types which need dynamic keys)
         def add_additional_properties_false(obj):
             if isinstance(obj, dict):
-                if obj.get("type") == "object":
+                if obj.get("type") == "object" and "additionalProperties" not in obj:
+                    # Only add if not already present (Dict types already have it defined)
                     obj["additionalProperties"] = False
                 # Recursively process nested objects
                 for key, value in obj.items():
@@ -80,48 +83,75 @@ def _pydantic_to_json_schema(model: Type['BaseModel']) -> dict:
     except ImportError:
         raise ImportError("Pydantic is required for structured outputs. Install with: pip install pydantic>=2.0.0")
 
-def _json_schema_to_polars_dtype(schema: dict) -> pl.DataType:
+def _json_schema_to_polars_dtype(schema: dict, root_schema: dict = None) -> pl.DataType:
     """Convert a JSON schema to a Polars DataType."""
+    # Keep reference to root schema for resolving $ref
+    if root_schema is None:
+        root_schema = schema
+
     properties = schema.get("properties", {})
 
     fields = []
     for field_name, field_schema in properties.items():
-        field_type = field_schema.get("type")
-
-        # Map JSON schema types to Polars types
-        if field_type == "string":
-            pl_type = pl.Utf8
-        elif field_type == "integer":
-            pl_type = pl.Int64
-        elif field_type == "number":
-            pl_type = pl.Float64
-        elif field_type == "boolean":
-            pl_type = pl.Boolean
-        elif field_type == "array":
-            # Handle arrays - use List type
-            items_schema = field_schema.get("items", {})
-            items_type = items_schema.get("type", "string")
-            if items_type == "string":
-                pl_type = pl.List(pl.Utf8)
-            elif items_type == "integer":
-                pl_type = pl.List(pl.Int64)
-            elif items_type == "number":
-                pl_type = pl.List(pl.Float64)
+        # Handle $ref references
+        if "$ref" in field_schema:
+            # Extract the reference path (e.g., "#/$defs/SentimentResult")
+            ref_path = field_schema["$ref"]
+            if ref_path.startswith("#/"):
+                # Navigate to the referenced schema
+                ref_parts = ref_path[2:].split("/")
+                ref_schema = root_schema
+                for part in ref_parts:
+                    ref_schema = ref_schema.get(part, {})
+                # Recursively convert the referenced schema
+                pl_type = _json_schema_to_polars_dtype(ref_schema, root_schema)
             else:
-                pl_type = pl.List(pl.Utf8)  # Default to string list
-        elif field_type == "object":
-            # Nested objects - recursively convert
-            pl_type = _json_schema_to_polars_dtype(field_schema)
+                # Unknown reference format, default to string
+                pl_type = pl.Utf8
         else:
-            # Default to string for unknown types
-            pl_type = pl.Utf8
+            field_type = field_schema.get("type")
+
+            # Map JSON schema types to Polars types
+            if field_type == "string":
+                pl_type = pl.Utf8
+            elif field_type == "integer":
+                pl_type = pl.Int64
+            elif field_type == "number":
+                pl_type = pl.Float64
+            elif field_type == "boolean":
+                pl_type = pl.Boolean
+            elif field_type == "array":
+                # Handle arrays - use List type
+                items_schema = field_schema.get("items", {})
+                items_type = items_schema.get("type", "string")
+                if items_type == "string":
+                    pl_type = pl.List(pl.Utf8)
+                elif items_type == "integer":
+                    pl_type = pl.List(pl.Int64)
+                elif items_type == "number":
+                    pl_type = pl.List(pl.Float64)
+                else:
+                    pl_type = pl.List(pl.Utf8)  # Default to string list
+            elif field_type == "object":
+                # Check if this is a Dict[str, str] type (has additionalProperties)
+                if "additionalProperties" in field_schema and field_schema["additionalProperties"] != False:
+                    # This is a dictionary type, just use Utf8 for now
+                    # (Polars doesn't have a good way to represent arbitrary dicts in structs)
+                    pl_type = pl.Utf8
+                else:
+                    # Nested objects - recursively convert
+                    pl_type = _json_schema_to_polars_dtype(field_schema, root_schema)
+            else:
+                # Default to string for unknown types
+                pl_type = pl.Utf8
 
         fields.append(pl.Field(field_name, pl_type))
 
-    # Add error fields for error handling
-    fields.append(pl.Field("_error", pl.Utf8))
-    fields.append(pl.Field("_details", pl.Utf8))
-    fields.append(pl.Field("_raw", pl.Utf8))
+    # Add error fields for error handling (only at the root level)
+    if root_schema == schema:
+        fields.append(pl.Field("_error", pl.Utf8))
+        fields.append(pl.Field("_details", pl.Utf8))
+        fields.append(pl.Field("_raw", pl.Utf8))
 
     return pl.Struct(fields)
 
@@ -627,13 +657,18 @@ def tag_taxonomy(
     # Create the system prompt with taxonomy instructions
     system_prompt = _create_taxonomy_prompt(taxonomy, document_field_name="document")
 
-    # Create a system message with the taxonomy instructions
-    system_message_expr = pl.lit(system_prompt).pipe(
-        string_to_message, message_type="system"
-    )
+    # Parse the document expression
+    doc_expr = parse_into_expr(expr)
+
+    # Create a system message for each row by mapping over the document column
+    # This ensures the system message is broadcast to match the number of rows
+    system_message_expr = doc_expr.map_batches(
+        lambda s: pl.Series([system_prompt] * len(s)),
+        return_dtype=pl.Utf8
+    ).pipe(string_to_message, message_type="system")
 
     # Create a user message with the document
-    user_message_expr = parse_into_expr(expr).pipe(
+    user_message_expr = doc_expr.pipe(
         string_to_message, message_type="user"
     )
 

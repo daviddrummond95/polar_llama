@@ -171,8 +171,10 @@ fn string_to_message(inputs: &[Series], kwargs: MessageKwargs) -> PolarsResult<S
 
     let out: StringChunked = ca.apply(|opt_value| {
         opt_value.map(|value| {
+            // Properly escape the content as a JSON string
+            let escaped_value = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string());
             Cow::Owned(format!(
-                "{{\"role\": \"{message_type}\", \"content\": \"{value}\"}}"
+                "{{\"role\": \"{message_type}\", \"content\": {escaped_value}}}"
             ))
         })
     });
