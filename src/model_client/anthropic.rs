@@ -118,7 +118,7 @@ impl ModelClient for AnthropicClient {
         let mut request = json!({
             "model": self.model_name(),
             "messages": formatted_messages,
-            "max_tokens": 1024
+            "max_tokens": 4096
         });
 
         // Add system parameter if we found a system message

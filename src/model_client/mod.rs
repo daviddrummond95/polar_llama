@@ -237,7 +237,17 @@ pub fn validate_json_schema(response: &str, schema_str: &str) -> Result<(), Stri
     if compiled_schema.is_valid(&response_value) {
         Ok(())
     } else {
-        Err("Response does not match the provided schema".to_string())
+        // Collect validation errors with details
+        let errors: Vec<String> = compiled_schema
+            .iter_errors(&response_value)
+            .map(|e| format!("{} at {}", e, e.instance_path))
+            .collect();
+
+        if errors.is_empty() {
+            Err("Response does not match the provided schema".to_string())
+        } else {
+            Err(format!("Schema validation failed: {}", errors.join("; ")))
+        }
     }
 }
 
