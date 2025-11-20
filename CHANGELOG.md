@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency scanning with Dependabot and cargo-audit
 - Code coverage reporting in CI pipeline
 
-## [0.2.1] - 2025-01-XX
+## [0.2.1] - 2025-11-19
 
 ### Added
 - Link-Time Optimization (LTO) for release builds to improve performance
@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Additional error handling improvements
 
-## [0.2.0] - 2025-01-XX
+## [0.2.0] - 2025-11-12
 
 ### Added
 - **Taxonomy-based tagging feature** with detailed reasoning and confidence scores
@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dead code warning in `AnthropicContent` struct
 - Python 3.8 compatibility issues in test suite
 
-## [0.1.6] - 2024-XX-XX
+## [0.1.6] - 2024-03-08
 
 ### Added
 - Comprehensive test suite for LLM inference interfaces
@@ -74,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AI inference error handling
 - Import paths and Python layer structure
 
-## [0.1.5] - 2024-XX-XX
+## [0.1.5] - 2024-03-08
 
 ### Added
 - AWS Bedrock provider support
@@ -90,7 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Import errors in tests
 - Non-existent feature flags removed
 
-## [0.1.0] - 2024-XX-XX
+## [0.1.0] - 2024-03-08
 
 ### Added
 - Initial release of Polar Llama
