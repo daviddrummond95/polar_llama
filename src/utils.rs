@@ -95,15 +95,20 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
                 .set("Content-Type", "application/json")
                 .send_string(&body);
 
-            let status = response.status();
-            if response.ok() {
-                let response_text = response.into_string()
-                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
-                parse_openai_response(&response_text)
-            } else {
-                let error_text = response.into_string()
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                Err(ModelClientError::Http(status, error_text))
+            match response {
+                Ok(resp) => {
+                    let response_text = resp.into_string()
+                        .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
+                    parse_openai_response(&response_text)
+                },
+                Err(ureq::Error::Status(code, resp)) => {
+                    let error_text = resp.into_string()
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    Err(ModelClientError::Http(code, error_text))
+                },
+                Err(e) => {
+                    Err(ModelClientError::Http(0, format!("HTTP Error: {e}")))
+                }
             }
         },
         Provider::Anthropic => {
@@ -121,15 +126,20 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
                 .set("Content-Type", "application/json")
                 .send_string(&body);
 
-            let status = response.status();
-            if response.ok() {
-                let response_text = response.into_string()
-                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
-                parse_anthropic_response(&response_text)
-            } else {
-                let error_text = response.into_string()
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                Err(ModelClientError::Http(status, error_text))
+            match response {
+                Ok(resp) => {
+                    let response_text = resp.into_string()
+                        .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
+                    parse_anthropic_response(&response_text)
+                },
+                Err(ureq::Error::Status(code, resp)) => {
+                    let error_text = resp.into_string()
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    Err(ModelClientError::Http(code, error_text))
+                },
+                Err(e) => {
+                    Err(ModelClientError::Http(0, format!("HTTP Error: {e}")))
+                }
             }
         },
         Provider::Gemini => {
@@ -151,15 +161,20 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
                 .set("Content-Type", "application/json")
                 .send_string(&body);
 
-            let status = response.status();
-            if response.ok() {
-                let response_text = response.into_string()
-                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
-                parse_gemini_response(&response_text)
-            } else {
-                let error_text = response.into_string()
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                Err(ModelClientError::Http(status, error_text))
+            match response {
+                Ok(resp) => {
+                    let response_text = resp.into_string()
+                        .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
+                    parse_gemini_response(&response_text)
+                },
+                Err(ureq::Error::Status(code, resp)) => {
+                    let error_text = resp.into_string()
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    Err(ModelClientError::Http(code, error_text))
+                },
+                Err(e) => {
+                    Err(ModelClientError::Http(0, format!("HTTP Error: {e}")))
+                }
             }
         },
         Provider::Groq => {
@@ -178,15 +193,20 @@ pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: P
                 .set("Content-Type", "application/json")
                 .send_string(&body);
 
-            let status = response.status();
-            if response.ok() {
-                let response_text = response.into_string()
-                    .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
-                parse_openai_response(&response_text) // Groq uses OpenAI-compatible format
-            } else {
-                let error_text = response.into_string()
-                    .unwrap_or_else(|_| "Unknown error".to_string());
-                Err(ModelClientError::Http(status, error_text))
+            match response {
+                Ok(resp) => {
+                    let response_text = resp.into_string()
+                        .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
+                    parse_openai_response(&response_text) // Groq uses OpenAI-compatible format
+                },
+                Err(ureq::Error::Status(code, resp)) => {
+                    let error_text = resp.into_string()
+                        .unwrap_or_else(|_| "Unknown error".to_string());
+                    Err(ModelClientError::Http(code, error_text))
+                },
+                Err(e) => {
+                    Err(ModelClientError::Http(0, format!("HTTP Error: {e}")))
+                }
             }
         },
         Provider::Bedrock => {

@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency scanning with Dependabot and cargo-audit
 - Code coverage reporting in CI pipeline
 
+### Security
+- Updated ureq from 0.11 to 2.x to fix rustls 0.16 vulnerabilities and webpki issues (RUSTSEC-2024-0336, RUSTSEC-2023-0052)
+- Updated tokio from 1.37 to 1.41 to fix unsound broadcast channel issue (RUSTSEC-2025-0023)
+- Updated reqwest from 0.11 to 0.12 to get newer rustls versions and fix ring vulnerabilities (RUSTSEC-2025-0009)
+- Updated futures from 0.3.30 to 0.3.31 to avoid yanked version
+- NOTE: pyo3 RUSTSEC-2025-0020 (buffer overflow) cannot be fixed yet as pyo3-polars 0.20.0 requires pyo3 0.23
+  - The vulnerability is in PyString::from_object which this codebase doesn't directly use
+  - Will update when pyo3-polars supports pyo3 0.24+
+- These updates address 6 out of 7 security advisories from cargo audit
+
 ## [0.2.1] - 2025-11-19
 
 ### Added
