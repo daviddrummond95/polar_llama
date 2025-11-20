@@ -460,3 +460,224 @@ fn embedding_output_type(_input_fields: &[Field]) -> PolarsResult<Field> {
         DataType::List(Box::new(DataType::Float64)),
     ))
 }
+
+// ============================================================================
+// Vector Similarity Operations
+// ============================================================================
+
+/// Calculate cosine similarity between two embedding vectors
+#[polars_expr(output_type=Float64)]
+fn cosine_similarity(inputs: &[Series]) -> PolarsResult<Series> {
+    let vec1 = inputs[0].list()?;
+    let vec2 = inputs[1].list()?;
+
+    let out: Float64Chunked = vec1
+        .amortized_iter()
+        .zip(vec2.amortized_iter())
+        .map(|(opt_v1, opt_v2)| {
+            match (opt_v1, opt_v2) {
+                (Some(v1), Some(v2)) => {
+                    let arr1 = v1.as_ref().f64()?;
+                    let arr2 = v2.as_ref().f64()?;
+
+                    if arr1.len() != arr2.len() {
+                        return Err(PolarsError::ComputeError(
+                            "Vectors must have the same length for cosine similarity".into()
+                        ));
+                    }
+
+                    let mut dot_product = 0.0;
+                    let mut norm1 = 0.0;
+                    let mut norm2 = 0.0;
+
+                    for i in 0..arr1.len() {
+                        if let (Some(a), Some(b)) = (arr1.get(i), arr2.get(i)) {
+                            dot_product += a * b;
+                            norm1 += a * a;
+                            norm2 += b * b;
+                        }
+                    }
+
+                    norm1 = norm1.sqrt();
+                    norm2 = norm2.sqrt();
+
+                    if norm1 == 0.0 || norm2 == 0.0 {
+                        Ok(Some(0.0))
+                    } else {
+                        Ok(Some(dot_product / (norm1 * norm2)))
+                    }
+                },
+                _ => Ok(None),
+            }
+        })
+        .collect::<PolarsResult<Float64Chunked>>()?;
+
+    Ok(out.into_series())
+}
+
+/// Calculate dot product between two embedding vectors
+#[polars_expr(output_type=Float64)]
+fn dot_product(inputs: &[Series]) -> PolarsResult<Series> {
+    let vec1 = inputs[0].list()?;
+    let vec2 = inputs[1].list()?;
+
+    let out: Float64Chunked = vec1
+        .amortized_iter()
+        .zip(vec2.amortized_iter())
+        .map(|(opt_v1, opt_v2)| {
+            match (opt_v1, opt_v2) {
+                (Some(v1), Some(v2)) => {
+                    let arr1 = v1.as_ref().f64()?;
+                    let arr2 = v2.as_ref().f64()?;
+
+                    if arr1.len() != arr2.len() {
+                        return Err(PolarsError::ComputeError(
+                            "Vectors must have the same length for dot product".into()
+                        ));
+                    }
+
+                    let mut result = 0.0;
+
+                    for i in 0..arr1.len() {
+                        if let (Some(a), Some(b)) = (arr1.get(i), arr2.get(i)) {
+                            result += a * b;
+                        }
+                    }
+
+                    Ok(Some(result))
+                },
+                _ => Ok(None),
+            }
+        })
+        .collect::<PolarsResult<Float64Chunked>>()?;
+
+    Ok(out.into_series())
+}
+
+/// Calculate Euclidean distance between two embedding vectors
+#[polars_expr(output_type=Float64)]
+fn euclidean_distance(inputs: &[Series]) -> PolarsResult<Series> {
+    let vec1 = inputs[0].list()?;
+    let vec2 = inputs[1].list()?;
+
+    let out: Float64Chunked = vec1
+        .amortized_iter()
+        .zip(vec2.amortized_iter())
+        .map(|(opt_v1, opt_v2)| {
+            match (opt_v1, opt_v2) {
+                (Some(v1), Some(v2)) => {
+                    let arr1 = v1.as_ref().f64()?;
+                    let arr2 = v2.as_ref().f64()?;
+
+                    if arr1.len() != arr2.len() {
+                        return Err(PolarsError::ComputeError(
+                            "Vectors must have the same length for Euclidean distance".into()
+                        ));
+                    }
+
+                    let mut sum_squared_diff = 0.0;
+
+                    for i in 0..arr1.len() {
+                        if let (Some(a), Some(b)) = (arr1.get(i), arr2.get(i)) {
+                            let diff = a - b;
+                            sum_squared_diff += diff * diff;
+                        }
+                    }
+
+                    Ok(Some(sum_squared_diff.sqrt()))
+                },
+                _ => Ok(None),
+            }
+        })
+        .collect::<PolarsResult<Float64Chunked>>()?;
+
+    Ok(out.into_series())
+}
+
+// ============================================================================
+// Approximate Nearest Neighbor Operations
+// ============================================================================
+
+#[derive(Deserialize)]
+pub struct KnnKwargs {
+    k: usize,
+}
+
+/// Find k-nearest neighbors for each embedding using HNSW index
+/// Returns a list of indices and distances for each query embedding
+#[polars_expr(output_type_func=knn_output_type)]
+fn knn_hnsw(inputs: &[Series], kwargs: KnnKwargs) -> PolarsResult<Series> {
+    let query_embeddings = inputs[0].list()?;
+    let reference_embeddings = inputs[1].list()?;
+    let k = kwargs.k;
+
+    // Extract all reference embeddings into a Vec<Vec<f64>>
+    let mut ref_vecs: Vec<Vec<f64>> = Vec::new();
+    for i in 0..reference_embeddings.len() {
+        if let Some(embedding_list) = reference_embeddings.get(i) {
+            // embedding_list is itself a list (of embeddings)
+            // We need to extract each embedding from this list
+            let inner_list = embedding_list.as_ref();
+
+            // Try to downcast to ListArray to iterate through embeddings
+            if let Some(list_arr) = inner_list.as_any().downcast_ref::<polars_arrow::array::ListArray<i64>>() {
+                // This is a list of lists
+                for inner_idx in 0..list_arr.len() {
+                    if let Some(inner_series) = list_arr.get(inner_idx) {
+                        if let Some(primitive_arr) = inner_series.as_any().downcast_ref::<polars_arrow::array::PrimitiveArray<f64>>() {
+                            let vec: Vec<f64> = primitive_arr.values_iter().copied().collect();
+                            ref_vecs.push(vec);
+                        }
+                    }
+                }
+            } else if let Some(primitive_arr) = inner_list.as_any().downcast_ref::<polars_arrow::array::PrimitiveArray<f64>>() {
+                // This is a flat list of floats (single embedding)
+                let vec: Vec<f64> = primitive_arr.values_iter().copied().collect();
+                ref_vecs.push(vec);
+            } else {
+                return Err(PolarsError::ComputeError("Expected Float64 or List[Float64] array".into()));
+            }
+        }
+    }
+
+    // Build HNSW index
+    let index = crate::ann::build_hnsw_index(ref_vecs);
+
+    // Search for k-nearest neighbors for each query
+    let mut builder = polars_core::chunked_array::builder::ListPrimitiveChunkedBuilder::<polars_core::datatypes::Int64Type>::new(
+        query_embeddings.name().clone(),
+        query_embeddings.len(),
+        k * 2, // indices + distances
+        polars::datatypes::DataType::Int64,
+    );
+
+    for i in 0..query_embeddings.len() {
+        if let Some(query_embedding) = query_embeddings.get(i) {
+            let inner_series = query_embedding.as_ref();
+            let arr = inner_series.as_any().downcast_ref::<polars_arrow::array::PrimitiveArray<f64>>()
+                .ok_or_else(|| PolarsError::ComputeError("Expected Float64 array for query".into()))?;
+            let query_vec: Vec<f64> = arr.values_iter().copied().collect();
+
+            let results = crate::ann::search_hnsw(&index, &query_vec, k);
+
+            // Store indices only for now
+            let indices: Vec<i64> = results.iter()
+                .map(|(idx, _dist)| *idx as i64)
+                .collect();
+
+            builder.append_slice(&indices);
+        } else {
+            builder.append_null();
+        }
+    }
+
+    Ok(builder.finish().into_series())
+}
+
+/// Output type function for knn_hnsw
+fn knn_output_type(_input_fields: &[Field]) -> PolarsResult<Field> {
+    Ok(Field::new(
+        PlSmallStr::from_static(""),
+        DataType::List(Box::new(DataType::Int64)),
+    ))
+}

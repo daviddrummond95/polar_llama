@@ -641,12 +641,239 @@ def embedding_async(
     if model is not None:
         kwargs["model"] = model
 
+    if kwargs:
+        return register_plugin(
+            args=[expr],
+            symbol="embedding_async",
+            is_elementwise=True,
+            lib=lib,
+            kwargs=kwargs,
+        )
+    else:
+        return register_plugin(
+            args=[expr],
+            symbol="embedding_async",
+            is_elementwise=True,
+            lib=lib,
+        )
+
+
+def cosine_similarity(
+    expr1: IntoExpr,
+    expr2: IntoExpr,
+) -> pl.Expr:
+    """
+    Calculate cosine similarity between two embedding vectors.
+
+    Cosine similarity measures the cosine of the angle between two vectors,
+    ranging from -1 (opposite) to 1 (identical). For normalized embeddings,
+    this is equivalent to dot product.
+
+    Parameters
+    ----------
+    expr1 : polars.Expr
+        First embedding vector (List[Float64])
+    expr2 : polars.Expr
+        Second embedding vector (List[Float64])
+
+    Returns
+    -------
+    polars.Expr
+        Cosine similarity score (Float64)
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from polar_llama import embedding_async, cosine_similarity
+    >>>
+    >>> df = pl.DataFrame({
+    ...     "text1": ["Hello world"],
+    ...     "text2": ["Hello there"]
+    ... })
+    >>> result = df.with_columns(
+    ...     emb1=embedding_async(pl.col("text1")),
+    ...     emb2=embedding_async(pl.col("text2"))
+    ... ).with_columns(
+    ...     similarity=cosine_similarity(pl.col("emb1"), pl.col("emb2"))
+    ... )
+    """
+    expr1 = parse_into_expr(expr1)
+    expr2 = parse_into_expr(expr2)
     return register_plugin(
-        args=[expr],
-        symbol="embedding_async",
+        args=[expr1, expr2],
+        symbol="cosine_similarity",
         is_elementwise=True,
         lib=lib,
-        kwargs=kwargs,
+    )
+
+
+def dot_product(
+    expr1: IntoExpr,
+    expr2: IntoExpr,
+) -> pl.Expr:
+    """
+    Calculate dot product between two embedding vectors.
+
+    The dot product is the sum of element-wise products of two vectors.
+
+    Parameters
+    ----------
+    expr1 : polars.Expr
+        First embedding vector (List[Float64])
+    expr2 : polars.Expr
+        Second embedding vector (List[Float64])
+
+    Returns
+    -------
+    polars.Expr
+        Dot product value (Float64)
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from polar_llama import embedding_async, dot_product
+    >>>
+    >>> df = pl.DataFrame({
+    ...     "text1": ["Hello world"],
+    ...     "text2": ["Hello there"]
+    ... })
+    >>> result = df.with_columns(
+    ...     emb1=embedding_async(pl.col("text1")),
+    ...     emb2=embedding_async(pl.col("text2"))
+    ... ).with_columns(
+    ...     dot_prod=dot_product(pl.col("emb1"), pl.col("emb2"))
+    ... )
+    """
+    expr1 = parse_into_expr(expr1)
+    expr2 = parse_into_expr(expr2)
+    return register_plugin(
+        args=[expr1, expr2],
+        symbol="dot_product",
+        is_elementwise=True,
+        lib=lib,
+    )
+
+
+def euclidean_distance(
+    expr1: IntoExpr,
+    expr2: IntoExpr,
+) -> pl.Expr:
+    """
+    Calculate Euclidean distance between two embedding vectors.
+
+    The Euclidean distance is the straight-line distance between two points
+    in n-dimensional space.
+
+    Parameters
+    ----------
+    expr1 : polars.Expr
+        First embedding vector (List[Float64])
+    expr2 : polars.Expr
+        Second embedding vector (List[Float64])
+
+    Returns
+    -------
+    polars.Expr
+        Euclidean distance (Float64)
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from polar_llama import embedding_async, euclidean_distance
+    >>>
+    >>> df = pl.DataFrame({
+    ...     "text1": ["Hello world"],
+    ...     "text2": ["Hello there"]
+    ... })
+    >>> result = df.with_columns(
+    ...     emb1=embedding_async(pl.col("text1")),
+    ...     emb2=embedding_async(pl.col("text2"))
+    ... ).with_columns(
+    ...     distance=euclidean_distance(pl.col("emb1"), pl.col("emb2"))
+    ... )
+    """
+    expr1 = parse_into_expr(expr1)
+    expr2 = parse_into_expr(expr2)
+    return register_plugin(
+        args=[expr1, expr2],
+        symbol="euclidean_distance",
+        is_elementwise=True,
+        lib=lib,
+    )
+
+
+def knn_hnsw(
+    query_expr: IntoExpr,
+    reference_expr: IntoExpr,
+    *,
+    k: int = 5,
+) -> pl.Expr:
+    """
+    Find k-nearest neighbors using Hierarchical Navigable Small World (HNSW) algorithm.
+
+    This function builds an HNSW index from the reference embeddings and searches
+    for the k nearest neighbors for each query embedding. HNSW provides approximate
+    nearest neighbor search that is much faster than exact search for large datasets.
+
+    Parameters
+    ----------
+    query_expr : polars.Expr
+        Query embedding vectors (List[Float64])
+    reference_expr : polars.Expr
+        Reference embedding vectors to search through (List[Float64])
+    k : int, optional
+        Number of nearest neighbors to return (default: 5)
+
+    Returns
+    -------
+    polars.Expr
+        List of indices (List[Int64]) of the k nearest neighbors
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from polar_llama import embedding_async, knn_hnsw
+    >>>
+    >>> # Create a corpus and query
+    >>> corpus_df = pl.DataFrame({
+    ...     "id": [1, 2, 3, 4],
+    ...     "text": [
+    ...         "Machine learning is fun",
+    ...         "Deep learning uses neural networks",
+    ...         "Python is a programming language",
+    ...         "Data science involves statistics"
+    ...     ]
+    ... }).with_columns(
+    ...     embeddings=embedding_async(pl.col("text"))
+    ... )
+    >>>
+    >>> # Find similar documents
+    >>> query = pl.DataFrame({
+    ...     "query": ["neural networks"]
+    ... }).with_columns(
+    ...     query_emb=embedding_async(pl.col("query"))
+    ... )
+    >>>
+    >>> # Cross join and find neighbors
+    >>> result = query.join(
+    ...     corpus_df.select([pl.col("embeddings").alias("corpus_emb")]),
+    ...     how="cross"
+    ... ).with_columns(
+    ...     neighbors=knn_hnsw(
+    ...         pl.col("query_emb"),
+    ...         pl.col("corpus_emb"),
+    ...         k=3
+    ...     )
+    ... )
+    """
+    query_expr = parse_into_expr(query_expr)
+    reference_expr = parse_into_expr(reference_expr)
+    return register_plugin(
+        args=[query_expr, reference_expr],
+        symbol="knn_hnsw",
+        is_elementwise=True,
+        lib=lib,
+        kwargs={"k": k},
     )
 
 
@@ -927,6 +1154,72 @@ class LlamaNamespace:
             provider=provider,
             model=model
         )
+
+    def cosine_similarity(self, other: IntoExpr) -> pl.Expr:
+        """
+        Calculate cosine similarity with another embedding vector.
+
+        Parameters
+        ----------
+        other : polars.Expr
+            The other embedding vector to compare with
+
+        Returns
+        -------
+        polars.Expr
+            Cosine similarity score
+        """
+        return cosine_similarity(self._expr, other)
+
+    def dot_product(self, other: IntoExpr) -> pl.Expr:
+        """
+        Calculate dot product with another embedding vector.
+
+        Parameters
+        ----------
+        other : polars.Expr
+            The other embedding vector to compute dot product with
+
+        Returns
+        -------
+        polars.Expr
+            Dot product value
+        """
+        return dot_product(self._expr, other)
+
+    def euclidean_distance(self, other: IntoExpr) -> pl.Expr:
+        """
+        Calculate Euclidean distance to another embedding vector.
+
+        Parameters
+        ----------
+        other : polars.Expr
+            The other embedding vector to measure distance to
+
+        Returns
+        -------
+        polars.Expr
+            Euclidean distance
+        """
+        return euclidean_distance(self._expr, other)
+
+    def knn_hnsw(self, reference: IntoExpr, *, k: int = 5) -> pl.Expr:
+        """
+        Find k-nearest neighbors using HNSW algorithm.
+
+        Parameters
+        ----------
+        reference : polars.Expr
+            Reference embeddings to search through
+        k : int, optional
+            Number of nearest neighbors to return (default: 5)
+
+        Returns
+        -------
+        polars.Expr
+            List of indices of the k nearest neighbors
+        """
+        return knn_hnsw(self._expr, reference, k=k)
 
 
 # ============================================================================

@@ -1,6 +1,7 @@
 mod expressions;
 pub mod utils;
 pub mod model_client;
+pub mod ann;
 
 #[cfg(target_os = "linux")]
 use jemallocator::Jemalloc;
