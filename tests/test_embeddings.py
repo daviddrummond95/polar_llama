@@ -150,14 +150,14 @@ def test_embedding_namespace():
 
 def test_empty_dataframe():
     """Test handling of empty dataframes."""
-    from polar_llama import embedding_async
+    from polar_llama import embedding_async, Provider
 
     df = pl.DataFrame({
         "text": []
     }, schema={"text": pl.Utf8})
 
     result = df.with_columns(
-        embeddings=embedding_async(pl.col("text"))
+        embeddings=embedding_async(pl.col("text"), provider=Provider.OPENAI)
     )
 
     assert result.height == 0

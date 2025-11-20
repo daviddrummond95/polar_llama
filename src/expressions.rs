@@ -488,7 +488,7 @@ fn combine_messages(inputs: &[Series]) -> PolarsResult<Series> {
 // Embedding Expressions
 // ============================================================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct EmbeddingKwargs {
     #[serde(default)]
     provider: Option<String>,
