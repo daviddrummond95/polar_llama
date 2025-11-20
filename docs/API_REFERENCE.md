@@ -275,8 +275,8 @@ df = pl.DataFrame({
 
 # Convert strings to message format
 df = df.with_columns([
-    pl.col('system_prompt').invoke('string_to_message', message_type='system'),
-    pl.col('user_question').invoke('string_to_message', message_type='user')
+    string_to_message(pl.col('system_prompt'), message_type='system').alias('system_prompt'),
+    string_to_message(pl.col('user_question'), message_type='user').alias('user_question')
 ])
 
 # Combine into conversation
@@ -309,7 +309,7 @@ df = pl.DataFrame({
 
 # Build conversation history
 df = df.with_columns([
-    pl.col('msg1').invoke('string_to_message', message_type='user').alias('m1'),
+    string_to_message(pl.col('msg1'), message_type='user').alias('m1'),
 ])
 
 # Get first response
@@ -318,10 +318,10 @@ df = df.with_columns(
 )
 
 # Continue conversation
-df = df.with_columns(
-    pl.col('resp1').invoke('string_to_message', message_type='assistant').alias('a1'),
-    pl.col('msg2').invoke('string_to_message', message_type='user').alias('m2'),
-)
+df = df.with_columns([
+    string_to_message(pl.col('resp1'), message_type='assistant').alias('a1'),
+    string_to_message(pl.col('msg2'), message_type='user').alias('m2'),
+])
 
 df = df.with_columns(
     conversation=combine_messages(pl.col('m1'), pl.col('a1'), pl.col('m2'))
@@ -373,8 +373,8 @@ df = pl.DataFrame({
 })
 
 df = df.with_columns([
-    pl.col('user_input').invoke('string_to_message', message_type='user'),
-    pl.col('system_instruction').invoke('string_to_message', message_type='system')
+    string_to_message(pl.col('user_input'), message_type='user'),
+    string_to_message(pl.col('system_instruction'), message_type='system')
 ])
 
 print(df['user_input'][0])
@@ -392,7 +392,7 @@ print(df['user_input'][0])
 **Notes:**
 - Content is properly JSON-escaped
 - Used in conjunction with `combine_messages` and `inference_messages`
-- Can be called via `.invoke()` method on Polars expressions
+- Call directly as a function, not via `.invoke()` method
 
 ---
 
@@ -801,12 +801,12 @@ df = pl.DataFrame({
 
 # Add system message
 df = df.with_columns(
-    pl.lit(system_msg).alias('system').invoke('string_to_message', message_type='system')
+    system=string_to_message(pl.lit(system_msg), message_type='system')
 )
 
 # Convert user queries to messages
 df = df.with_columns(
-    pl.col('user_query').invoke('string_to_message', message_type='user').alias('user_msg')
+    user_msg=string_to_message(pl.col('user_query'), message_type='user')
 )
 
 # Create conversations and get responses

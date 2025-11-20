@@ -51,12 +51,12 @@ df = pl.DataFrame({'Questions': questions})
 
 # Adding prompts to the dataframe
 df = df.with_columns(
-    prompt=string_to_message("Questions", message_type='user')
+    prompt=string_to_message(pl.col("Questions"), message_type='user')
 )
 
 # Sending parallel inference requests
 df = df.with_columns(
-    answer=inference_async('prompt', provider = Provider.OPENAI, model = 'gpt-4o-mini')
+    answer=inference_async(pl.col('prompt'), provider=Provider.OPENAI, model='gpt-4o-mini')
 )
 ```
 
@@ -85,18 +85,18 @@ df = pl.DataFrame({
 
 # Convert to structured messages
 df = df.with_columns([
-    pl.col("system_prompt").invoke("string_to_message", message_type="system").alias("system_message"),
-    pl.col("user_question").invoke("string_to_message", message_type="user").alias("user_message")
+    string_to_message(pl.col("system_prompt"), message_type="system").alias("system_message"),
+    string_to_message(pl.col("user_question"), message_type="user").alias("user_message")
 ])
 
 # Combine into conversations
 df = df.with_columns(
-    pl.invoke("combine_messages", pl.col("system_message"), pl.col("user_message")).alias("conversation")
+    conversation=combine_messages(pl.col("system_message"), pl.col("user_message"))
 )
 
 # Send to model and get responses
 df = df.with_columns(
-    pl.col("conversation").invoke("inference_messages", provider="openai", model="gpt-4").alias("response")
+    response=inference_messages(pl.col("conversation"), provider="openai", model="gpt-4")
 )
 ```
 
@@ -122,12 +122,12 @@ df = pl.DataFrame({'Questions': questions})
 
 # Adding prompts to the dataframe
 df = df.with_columns(
-    prompt=string_to_message("Questions", message_type='user')
+    prompt=string_to_message(pl.col("Questions"), message_type='user')
 )
 
 # Using AWS Bedrock with Claude model
 df = df.with_columns(
-    answer=inference_async('prompt', provider='bedrock', model='anthropic.claude-3-haiku-20240307-v1:0')
+    answer=inference_async(pl.col('prompt'), provider='bedrock', model='anthropic.claude-3-haiku-20240307-v1:0')
 )
 ```
 
