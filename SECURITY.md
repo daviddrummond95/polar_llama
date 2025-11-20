@@ -19,7 +19,7 @@ We take the security of Polar Llama seriously. If you discover a security vulner
 
 Instead, please report security vulnerabilities by:
 
-1. **Email**: Send a detailed report to the maintainer at [daviddrummond95@github.com]
+1. **Email**: Send a detailed report to the maintainer at [david.drummond.ai@gmail.com]
    - Include "SECURITY" in the subject line
    - Provide a clear description of the vulnerability
    - Include steps to reproduce the issue
