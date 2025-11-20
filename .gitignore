@@ -6,3 +6,4 @@ uv.lock
 Cargo.lock
 PARALLELIZATION.md
 Cargo.lock
+test_output.txt
