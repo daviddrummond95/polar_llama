@@ -1,0 +1,28 @@
+# cargo-audit configuration
+# This file documents security advisories that are temporarily accepted with justification
+
+[advisories]
+# Ignore list for known and accepted vulnerabilities
+ignore = [
+    "RUSTSEC-2025-0020",  # PyO3 buffer overflow - see details below
+]
+
+# PyO3 buffer overflow in PyString::from_object
+# RUSTSEC-2025-0020
+#
+# STATUS: Accepted (Temporary)
+# REASON: Blocked by pyo3-polars dependency
+#
+# Details:
+# - pyo3-polars 0.20.0 (required for polars 0.46.0) only supports pyo3 0.23
+# - pyo3-polars 0.25.0 requires polars 0.52.0, which has Rust compatibility issues
+# - The vulnerability is in PyString::from_object, which we do not directly use
+# - Risk is assessed as LOW for our use case
+#
+# Mitigation plan:
+# 1. Monitor pyo3-polars and polars releases
+# 2. Upgrade when polars 0.52+ stabilizes (expected within 1-2 months)
+# 3. Track upstream issue: https://github.com/pola-rs/pyo3-polars/issues
+#
+# Last reviewed: 2025-01-20
+# Review again: 2025-03-20 (or when polars 0.52+ is stable)

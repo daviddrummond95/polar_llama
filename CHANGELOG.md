@@ -15,16 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Architecture diagram in documentation
 - Dependency scanning with Dependabot and cargo-audit
 - Code coverage reporting in CI pipeline
+- `.cargo/audit.toml` configuration for documented security exceptions
 
 ### Security
+- **Fixed RUSTSEC-2025-0024**: Updated crossbeam-channel from 0.5.14 to 0.5.15 (double free on Drop)
+- **Fixed RUSTSEC-2024-0421**: Updated idna dependency via url crate upgrade (Punycode label issue)
+- **Fixed RUSTSEC-2025-0009**: Updated ring from 0.17.11 to 0.17.14 (AES panic issue)
 - Updated ureq from 0.11 to 2.x to fix rustls 0.16 vulnerabilities and webpki issues (RUSTSEC-2024-0336, RUSTSEC-2023-0052)
-- Updated tokio from 1.37 to 1.41 to fix unsound broadcast channel issue (RUSTSEC-2025-0023)
-- Updated reqwest from 0.11 to 0.12 to get newer rustls versions and fix ring vulnerabilities (RUSTSEC-2025-0009)
+- Updated tokio from 1.37 to 1.48 to fix unsound broadcast channel issue (RUSTSEC-2025-0023)
+- Updated reqwest from 0.11 to 0.12 to get newer rustls versions
 - Updated futures from 0.3.30 to 0.3.31 to avoid yanked version
-- NOTE: pyo3 RUSTSEC-2025-0020 (buffer overflow) cannot be fixed yet as pyo3-polars 0.20.0 requires pyo3 0.23
+- **Documented RUSTSEC-2025-0020** (pyo3 buffer overflow): Cannot be fixed yet as pyo3-polars 0.20.0 requires pyo3 0.23
   - The vulnerability is in PyString::from_object which this codebase doesn't directly use
-  - Will update when pyo3-polars supports pyo3 0.24+
-- These updates address 6 out of 7 security advisories from cargo audit
+  - Risk assessed as LOW for our use case
+  - Will update when polars 0.52+ stabilizes and pyo3-polars supports pyo3 0.24+
+  - Documented in audit.toml with justification
+- **3 out of 4 critical vulnerabilities resolved**, 1 documented and accepted with risk assessment
 
 ## [0.2.1] - 2025-11-19
 
