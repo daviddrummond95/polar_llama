@@ -5,6 +5,7 @@ Complete reference documentation for all Polar Llama expressions and functions.
 ## Table of Contents
 
 - [Overview](#overview)
+- [Polars Namespace (.llama)](#polars-namespace-llama)
 - [Providers](#providers)
 - [Expressions](#expressions)
   - [inference](#inference)
@@ -21,6 +22,10 @@ Complete reference documentation for all Polar Llama expressions and functions.
 
 Polar Llama provides Polars expressions for integrating Large Language Model (LLM) inference directly into your dataframe workflows. All expressions support multiple LLM providers and can be used with standard Polars column operations.
 
+**Two API Styles:**
+1. **Fluent `.llama` namespace** (recommended) - More Polars-idiomatic
+2. **Functional API** - Direct function calls
+
 ### Installation
 
 ```bash
@@ -31,17 +36,76 @@ pip install polar-llama
 
 ```python
 import polars as pl
-from polar_llama import inference_async, Provider
+from polar_llama import Provider
 
 df = pl.DataFrame({'questions': ['What is AI?', 'Explain machine learning']})
+
+# Recommended: Using .llama namespace
 df = df.with_columns(
-    answer=inference_async(
-        pl.col('questions'),
+    answer=pl.col('questions').llama.inference_async(
         provider=Provider.OPENAI,
         model='gpt-4o-mini'
     )
 )
 ```
+
+## Polars Namespace (.llama)
+
+Polar Llama registers a `.llama` namespace on Polars expressions, providing a fluent, chainable API.
+
+### Available Methods
+
+| Method | Description |
+|--------|-------------|
+| `.llama.to_message(role='user')` | Convert text to message format |
+| `.llama.inference(...)` | Synchronous LLM inference |
+| `.llama.inference_async(...)` | Async parallel LLM inference |
+| `.llama.tag_taxonomy(taxonomy, ...)` | Taxonomy-based classification |
+
+### Examples
+
+**Convert to Message:**
+```python
+df = df.with_columns(
+    msg=pl.col('text').llama.to_message(role='user')
+)
+```
+
+**Async Inference:**
+```python
+df = df.with_columns(
+    answer=pl.col('question').llama.inference_async(
+        provider=Provider.OPENAI,
+        model='gpt-4o-mini'
+    )
+)
+```
+
+**Taxonomy Tagging:**
+```python
+taxonomy = {
+    "sentiment": {
+        "description": "Emotional tone",
+        "values": {
+            "positive": "Positive emotions",
+            "negative": "Negative emotions"
+        }
+    }
+}
+
+df = df.with_columns(
+    tags=pl.col('text').llama.tag_taxonomy(
+        taxonomy,
+        provider=Provider.ANTHROPIC
+    )
+)
+```
+
+**Benefits:**
+- ✅ More readable and chainable
+- ✅ Follows Polars conventions (like `.str`, `.dt`, `.list`)
+- ✅ IDE autocomplete support
+- ✅ Less import noise
 
 ## Providers
 
