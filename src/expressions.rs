@@ -15,6 +15,18 @@ use polars::datatypes::DataType;
 // Initialize a global runtime for all async operations
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create Tokio runtime"));
 
+// Helper function to run async operations in a way that allows true parallelization
+// Instead of directly blocking on async work, we spawn it as a task and then block on the handle
+// This allows multiple threads to spawn tasks that run concurrently on the runtime's thread pool
+fn run_async<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = RT.spawn(future);
+    RT.block_on(handle).expect("Task panicked")
+}
+
 #[derive(Debug, Deserialize)]
 pub struct InferenceKwargs {
     #[serde(default)]
@@ -93,33 +105,67 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
     // Get results based on provider and model
     let api_results = if kwargs.response_schema.is_some() {
         // Use structured output with validation
-        let schema_opt = kwargs.response_schema.as_deref();
-        let model_name_opt = kwargs.response_model_name.as_deref();
+        // Clone the strings so we can move them into async blocks
+        let schema_owned = kwargs.response_schema.clone();
+        let model_name_owned = kwargs.response_model_name.clone();
 
         match (&kwargs.provider, &kwargs.model) {
             (Some(provider_str), Some(model)) => {
                 // Try to parse provider string to Provider enum
                 if let Some(provider) = parse_provider(provider_str) {
-                    RT.block_on(fetch_data_with_provider_and_schema(&messages, provider, model, schema_opt, model_name_opt))
+                    let messages_owned = messages.clone();
+                    let model_owned = model.clone();
+                    let schema = schema_owned.clone();
+                    let model_name = model_name_owned.clone();
+                    run_async(async move {
+                        fetch_data_with_provider_and_schema(&messages_owned, provider, &model_owned, schema.as_deref(), model_name.as_deref()).await
+                    })
                 } else {
-                    RT.block_on(fetch_data_with_provider_and_schema(&messages, Provider::OpenAI, model, schema_opt, model_name_opt))
+                    let messages_owned = messages.clone();
+                    let model_owned = model.clone();
+                    let schema = schema_owned.clone();
+                    let model_name = model_name_owned.clone();
+                    run_async(async move {
+                        fetch_data_with_provider_and_schema(&messages_owned, Provider::OpenAI, &model_owned, schema.as_deref(), model_name.as_deref()).await
+                    })
                 }
             },
             (Some(provider_str), None) => {
                 if let Some(provider) = parse_provider(provider_str) {
                     let default_model = get_default_model(provider);
-                    RT.block_on(fetch_data_with_provider_and_schema(&messages, provider, default_model, schema_opt, model_name_opt))
+                    let messages_owned = messages.clone();
+                    let schema = schema_owned.clone();
+                    let model_name = model_name_owned.clone();
+                    run_async(async move {
+                        fetch_data_with_provider_and_schema(&messages_owned, provider, default_model, schema.as_deref(), model_name.as_deref()).await
+                    })
                 } else {
                     let default_model = get_default_model(Provider::OpenAI);
-                    RT.block_on(fetch_data_with_provider_and_schema(&messages, Provider::OpenAI, default_model, schema_opt, model_name_opt))
+                    let messages_owned = messages.clone();
+                    let schema = schema_owned.clone();
+                    let model_name = model_name_owned.clone();
+                    run_async(async move {
+                        fetch_data_with_provider_and_schema(&messages_owned, Provider::OpenAI, default_model, schema.as_deref(), model_name.as_deref()).await
+                    })
                 }
             },
             (None, Some(model)) => {
-                RT.block_on(fetch_data_with_provider_and_schema(&messages, Provider::OpenAI, model, schema_opt, model_name_opt))
+                let messages_owned = messages.clone();
+                let model_owned = model.clone();
+                let schema = schema_owned.clone();
+                let model_name = model_name_owned.clone();
+                run_async(async move {
+                    fetch_data_with_provider_and_schema(&messages_owned, Provider::OpenAI, &model_owned, schema.as_deref(), model_name.as_deref()).await
+                })
             },
             (None, None) => {
                 let default_model = get_default_model(Provider::OpenAI);
-                RT.block_on(fetch_data_with_provider_and_schema(&messages, Provider::OpenAI, default_model, schema_opt, model_name_opt))
+                let messages_owned = messages.clone();
+                let schema = schema_owned.clone();
+                let model_name = model_name_owned.clone();
+                run_async(async move {
+                    fetch_data_with_provider_and_schema(&messages_owned, Provider::OpenAI, default_model, schema.as_deref(), model_name.as_deref()).await
+                })
             },
         }
     } else {
@@ -127,24 +173,45 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
         match (&kwargs.provider, &kwargs.model) {
             (Some(provider_str), Some(model)) => {
                 if let Some(provider) = parse_provider(provider_str) {
-                    RT.block_on(fetch_data_with_provider(&messages, provider, model))
+                    let messages_owned = messages.clone();
+                    let model_owned = model.clone();
+                    run_async(async move {
+                        fetch_data_with_provider(&messages_owned, provider, &model_owned).await
+                    })
                 } else {
-                    RT.block_on(fetch_data_with_provider(&messages, Provider::OpenAI, model))
+                    let messages_owned = messages.clone();
+                    let model_owned = model.clone();
+                    run_async(async move {
+                        fetch_data_with_provider(&messages_owned, Provider::OpenAI, &model_owned).await
+                    })
                 }
             },
             (Some(provider_str), None) => {
                 if let Some(provider) = parse_provider(provider_str) {
                     let default_model = get_default_model(provider);
-                    RT.block_on(fetch_data_with_provider(&messages, provider, default_model))
+                    let messages_owned = messages.clone();
+                    run_async(async move {
+                        fetch_data_with_provider(&messages_owned, provider, default_model).await
+                    })
                 } else {
-                    RT.block_on(fetch_data(&messages))
+                    let messages_owned = messages.clone();
+                    run_async(async move {
+                        fetch_data(&messages_owned).await
+                    })
                 }
             },
             (None, Some(model)) => {
-                RT.block_on(fetch_data_with_provider(&messages, Provider::OpenAI, model))
+                let messages_owned = messages.clone();
+                let model_owned = model.clone();
+                run_async(async move {
+                    fetch_data_with_provider(&messages_owned, Provider::OpenAI, &model_owned).await
+                })
             },
             (None, None) => {
-                RT.block_on(fetch_data(&messages))
+                let messages_owned = messages.clone();
+                run_async(async move {
+                    fetch_data(&messages_owned).await
+                })
             },
         }
     };
@@ -214,32 +281,66 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
     // Get results based on provider and model
     let api_results = if kwargs.response_schema.is_some() {
         // Use structured output with validation
-        let schema_opt = kwargs.response_schema.as_deref();
-        let model_name_opt = kwargs.response_model_name.as_deref();
+        // Clone the strings so we can move them into async blocks
+        let schema_owned = kwargs.response_schema.clone();
+        let model_name_owned = kwargs.response_model_name.clone();
 
         match (&kwargs.provider, &kwargs.model) {
             (Some(provider_str), Some(model)) => {
                 if let Some(provider) = parse_provider(provider_str) {
-                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, provider, model, schema_opt, model_name_opt))
+                    let arrays_owned = message_arrays.clone();
+                    let model_owned = model.clone();
+                    let schema = schema_owned.clone();
+                    let model_name = model_name_owned.clone();
+                    run_async(async move {
+                        crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, provider, &model_owned, schema.as_deref(), model_name.as_deref()).await
+                    })
                 } else {
-                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, Provider::OpenAI, model, schema_opt, model_name_opt))
+                    let arrays_owned = message_arrays.clone();
+                    let model_owned = model.clone();
+                    let schema = schema_owned.clone();
+                    let model_name = model_name_owned.clone();
+                    run_async(async move {
+                        crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, Provider::OpenAI, &model_owned, schema.as_deref(), model_name.as_deref()).await
+                    })
                 }
             },
             (Some(provider_str), None) => {
                 if let Some(provider) = parse_provider(provider_str) {
                     let default_model = get_default_model(provider);
-                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, provider, default_model, schema_opt, model_name_opt))
+                    let arrays_owned = message_arrays.clone();
+                    let schema = schema_owned.clone();
+                    let model_name = model_name_owned.clone();
+                    run_async(async move {
+                        crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, provider, default_model, schema.as_deref(), model_name.as_deref()).await
+                    })
                 } else {
                     let default_model = get_default_model(Provider::OpenAI);
-                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, Provider::OpenAI, default_model, schema_opt, model_name_opt))
+                    let arrays_owned = message_arrays.clone();
+                    let schema = schema_owned.clone();
+                    let model_name = model_name_owned.clone();
+                    run_async(async move {
+                        crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, Provider::OpenAI, default_model, schema.as_deref(), model_name.as_deref()).await
+                    })
                 }
             },
             (None, Some(model)) => {
-                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, Provider::OpenAI, model, schema_opt, model_name_opt))
+                let arrays_owned = message_arrays.clone();
+                let model_owned = model.clone();
+                let schema = schema_owned.clone();
+                let model_name = model_name_owned.clone();
+                run_async(async move {
+                    crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, Provider::OpenAI, &model_owned, schema.as_deref(), model_name.as_deref()).await
+                })
             },
             (None, None) => {
                 let default_model = get_default_model(Provider::OpenAI);
-                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider_and_schema(&message_arrays, Provider::OpenAI, default_model, schema_opt, model_name_opt))
+                let arrays_owned = message_arrays.clone();
+                let schema = schema_owned.clone();
+                let model_name = model_name_owned.clone();
+                run_async(async move {
+                    crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, Provider::OpenAI, default_model, schema.as_deref(), model_name.as_deref()).await
+                })
             },
         }
     } else {
@@ -247,24 +348,44 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
         match (&kwargs.provider, &kwargs.model) {
             (Some(provider_str), Some(model)) => {
                 if let Some(provider) = parse_provider(provider_str) {
-                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, model))
+                    let arrays_owned = message_arrays.clone();
+                    let model_owned = model.clone();
+                    run_async(async move {
+                        crate::utils::fetch_data_message_arrays_with_provider(&arrays_owned, provider, &model_owned).await
+                    })
                 } else {
-                    RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
+                    let arrays_owned = message_arrays.clone();
+                    run_async(async move {
+                        crate::utils::fetch_data_message_arrays(&arrays_owned).await
+                    })
                 }
             },
             (Some(provider_str), None) => {
                 if let Some(provider) = parse_provider(provider_str) {
                     let default_model = get_default_model(provider);
-                    RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, default_model))
+                    let arrays_owned = message_arrays.clone();
+                    run_async(async move {
+                        crate::utils::fetch_data_message_arrays_with_provider(&arrays_owned, provider, default_model).await
+                    })
                 } else {
-                    RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
+                    let arrays_owned = message_arrays.clone();
+                    run_async(async move {
+                        crate::utils::fetch_data_message_arrays(&arrays_owned).await
+                    })
                 }
             },
             (None, Some(model)) => {
-                RT.block_on(crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, Provider::OpenAI, model))
+                let arrays_owned = message_arrays.clone();
+                let model_owned = model.clone();
+                run_async(async move {
+                    crate::utils::fetch_data_message_arrays_with_provider(&arrays_owned, Provider::OpenAI, &model_owned).await
+                })
             },
             (None, None) => {
-                RT.block_on(crate::utils::fetch_data_message_arrays(&message_arrays))
+                let arrays_owned = message_arrays.clone();
+                run_async(async move {
+                    crate::utils::fetch_data_message_arrays(&arrays_owned).await
+                })
             },
         }
     };
@@ -425,8 +546,13 @@ fn embedding_async(inputs: &[Series], kwargs: EmbeddingKwargs) -> PolarsResult<S
         .model
         .unwrap_or_else(|| get_default_embedding_model(provider).to_string());
 
-    // Fetch embeddings in parallel
-    let api_results = RT.block_on(fetch_embeddings_with_provider(&texts, provider, &model));
+    // Fetch embeddings in parallel using spawn for true parallelization
+    // Clone data for 'static lifetime requirement of spawn
+    let texts_owned = texts.clone();
+    let model_owned = model.clone();
+    let api_results = run_async(async move {
+        fetch_embeddings_with_provider(&texts_owned, provider, &model_owned).await
+    });
 
     // Map results back to original positions
     let mut results: Vec<Option<Vec<f64>>> = vec![None; ca.len()];
