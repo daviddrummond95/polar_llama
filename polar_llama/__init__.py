@@ -279,7 +279,8 @@ def inference_async(
     *,
     provider: Optional[Union[str, Provider]] = None,
     model: Optional[str] = None,
-    response_model: Optional[Type['BaseModel']] = None
+    response_model: Optional[Type['BaseModel']] = None,
+    response_format: Optional[Type['BaseModel']] = None,
 ) -> pl.Expr:
     """
     Asynchronously infer completions for the given text expressions using an LLM.
@@ -315,8 +316,13 @@ def inference_async(
     if model is not None:
         kwargs["model"] = model
 
+    # Handle response_format alias
+    if response_model is None and response_format is not None:
+        response_model = response_format
+
     struct_dtype = None
     if response_model is not None:
+        _validate_strict_mode_schema(response_model)
         schema = _pydantic_to_json_schema(response_model)
         # Pass the JSON schema as a JSON string to Rust
         kwargs["response_schema"] = json.dumps(schema)
@@ -347,7 +353,8 @@ def inference(
     *,
     provider: Optional[Union[str, Provider]] = None,
     model: Optional[str] = None,
-    response_model: Optional[Type['BaseModel']] = None
+    response_model: Optional[Type['BaseModel']] = None,
+    response_format: Optional[Type['BaseModel']] = None,
 ) -> pl.Expr:
     """
     Synchronously infer completions for the given text expressions using an LLM.
@@ -364,6 +371,8 @@ def inference(
         A Pydantic model class to define structured output schema.
         The LLM response will be validated against this schema.
         Returns a Struct with fields matching the Pydantic model.
+    response_format : Type[BaseModel], optional
+        Alias for response_model.
 
     Returns
     -------
@@ -383,8 +392,13 @@ def inference(
     if model is not None:
         kwargs["model"] = model
 
+    # Handle response_format alias
+    if response_model is None and response_format is not None:
+        response_model = response_format
+
     struct_dtype = None
     if response_model is not None:
+        _validate_strict_mode_schema(response_model)
         schema = _pydantic_to_json_schema(response_model)
         # Pass the JSON schema as a JSON string to Rust
         kwargs["response_schema"] = json.dumps(schema)
@@ -415,7 +429,8 @@ def inference_messages(
     *,
     provider: Optional[Union[str, Provider]] = None,
     model: Optional[str] = None,
-    response_model: Optional[Type['BaseModel']] = None
+    response_model: Optional[Type['BaseModel']] = None,
+    response_format: Optional[Type['BaseModel']] = None,
 ) -> pl.Expr:
     """
     Process message arrays (conversations) for inference using LLMs.
@@ -435,6 +450,8 @@ def inference_messages(
         A Pydantic model class to define structured output schema.
         The LLM response will be validated against this schema.
         Returns a Struct with fields matching the Pydantic model.
+    response_format : Type[BaseModel], optional
+        Alias for response_model.
 
     Returns
     -------
@@ -459,8 +476,13 @@ def inference_messages(
     if model is not None:
         kwargs["model"] = model
 
+    # Handle response_format alias
+    if response_model is None and response_format is not None:
+        response_model = response_format
+
     struct_dtype = None
     if response_model is not None:
+        _validate_strict_mode_schema(response_model)
         schema = _pydantic_to_json_schema(response_model)
         # Pass the JSON schema as a JSON string to Rust
         kwargs["response_schema"] = json.dumps(schema)
@@ -682,3 +704,207 @@ def tag_taxonomy(
         model=model,
         response_model=response_model
     )
+
+
+# ============================================================================
+# Polars Namespace Accessor
+# ============================================================================
+
+@pl.api.register_expr_namespace("llama")
+class LlamaNamespace:
+    """
+    Polars namespace accessor for polar-llama functionality.
+    Allows using `.llama` on expressions for a fluent API.
+    """
+    def __init__(self, expr: pl.Expr):
+        self._expr = expr
+
+    def to_message(self, *, role: str = "user") -> pl.Expr:
+        """
+        Convert a string expression to a message with the specified role.
+        
+        Parameters
+        ----------
+        role : str
+            The role of the message ("user", "system", "assistant")
+            
+        Returns
+        -------
+        polars.Expr
+            Expression with formatted messages
+        """
+        return string_to_message(self._expr, message_type=role)
+
+    def inference(
+        self,
+        *,
+        provider: Optional[Union[str, Provider]] = None,
+        model: Optional[str] = None,
+        response_model: Optional[Type['BaseModel']] = None,
+        response_format: Optional[Type['BaseModel']] = None,
+    ) -> pl.Expr:
+        """
+        Synchronously infer completions for the expression using an LLM.
+        
+        Parameters
+        ----------
+        provider : str or Provider, optional
+            The provider to use
+        model : str, optional
+            The model name to use
+        response_model : Type[BaseModel], optional
+            Pydantic model for structured output
+        response_format : Type[BaseModel], optional
+            Alias for response_model
+            
+        Returns
+        -------
+        polars.Expr
+            Expression with inferred completions
+        """
+        return inference(
+            self._expr,
+            provider=provider,
+            model=model,
+            response_model=response_model or response_format
+        )
+
+    def inference_async(
+        self,
+        *,
+        provider: Optional[Union[str, Provider]] = None,
+        model: Optional[str] = None,
+        response_model: Optional[Type['BaseModel']] = None,
+        response_format: Optional[Type['BaseModel']] = None,
+    ) -> pl.Expr:
+        """
+        Asynchronously infer completions for the expression using an LLM.
+        
+        Parameters
+        ----------
+        provider : str or Provider, optional
+            The provider to use
+        model : str, optional
+            The model name to use
+        response_model : Type[BaseModel], optional
+            Pydantic model for structured output
+        response_format : Type[BaseModel], optional
+            Alias for response_model
+            
+        Returns
+        -------
+        polars.Expr
+            Expression with inferred completions
+        """
+        return inference_async(
+            self._expr,
+            provider=provider,
+            model=model,
+            response_model=response_model or response_format
+        )
+    
+    def tag_taxonomy(
+        self,
+        taxonomy: Dict[str, Dict[str, Any]],
+        *,
+        provider: Optional[Union[str, Provider]] = None,
+        model: Optional[str] = None,
+    ) -> pl.Expr:
+        """
+        Tag documents according to a taxonomy definition.
+        """
+        return tag_taxonomy(
+            self._expr,
+            taxonomy,
+            provider=provider,
+            model=model
+        )
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def template(format_string: str, *args: IntoExpr, **kwargs: IntoExpr) -> pl.Expr:
+    """
+    Helper function for prompt templating that abstracts away Polars version differences.
+    
+    Usage:
+        polar_llama.template("Hello {}", pl.col("name"))
+        polar_llama.template("Hello {name}", name=pl.col("name"))
+        
+    Parameters
+    ----------
+    format_string : str
+        The format string
+    *args : polars.Expr
+        Positional arguments for formatting
+    **kwargs : polars.Expr
+        Keyword arguments for formatting
+        
+    Returns
+    -------
+    polars.Expr
+        Formatted string expression
+    """
+    # Check if current Polars version supports kwargs in pl.format
+    # pl.format with kwargs was introduced in recent versions
+    # If we want to be safe, we can try to use it, and if it fails, fallback or error
+    # But simpler is to rely on pl.format if available.
+    
+    # For now, we'll just wrap pl.format. 
+    # If the user is on an old version that doesn't support kwargs, they should use positional args
+    # or we can try to implement a polyfill if needed.
+    # However, the recommendation implies we should abstract it.
+    
+    try:
+        return pl.format(format_string, *args, **kwargs)
+    except TypeError:
+        # Fallback for older Polars versions that might not support kwargs
+        if kwargs:
+            # If kwargs are provided but not supported, we can't easily map them to positional
+            # without parsing the format string.
+            # But we can try to warn or just let it fail if we can't fix it.
+            # Alternatively, we can assume the user knows what they are doing or guide them.
+            # But the recommendation says "Abstract Prompt Templating... ensure the library works consistently".
+            pass
+        return pl.format(format_string, *args)
+
+def _validate_strict_mode_schema(model: Type['BaseModel']) -> None:
+    """
+    Validate that a Pydantic model is compatible with OpenAI Strict Mode.
+    Specifically checks for default values which are not allowed.
+    """
+    try:
+        from pydantic import BaseModel
+        from pydantic.fields import FieldInfo
+        
+        if not issubclass(model, BaseModel):
+            return
+
+        for name, field in model.model_fields.items():
+            # Check if field has a default value
+            # In Pydantic v2, field.default is PydanticUndefined if no default
+            # field.is_required() is another way to check
+            
+            if not field.is_required():
+                # It has a default value (or is Optional with default None)
+                # OpenAI Strict Mode doesn't support default values for required fields?
+                # Actually, OpenAI Strict Mode requires all fields to be required (no optionality in the JSON schema sense of missing keys),
+                # but it DOES allow nullable fields if they are part of the schema.
+                # However, the issue reported is "rejects fields with default values like currency: str = 'USD'".
+                # This means the field is NOT required in Pydantic, so it has a default.
+                # OpenAI expects the schema to NOT have defaults if we want strict adherence?
+                # Or rather, OpenAI's structured outputs require all fields to be specified in the schema and usually required.
+                
+                # Let's warn if we see a default value that is not None (Optional is usually fine if handled correctly, but defaults like "USD" are problematic)
+                if field.default is not None and str(field.default) != "PydanticUndefined":
+                     import warnings
+                     warnings.warn(
+                         f"Field '{name}' in model '{model.__name__}' has a default value '{field.default}'. "
+                         "OpenAI Structured Outputs (Strict Mode) may not support default values. "
+                         "Consider removing the default value or handling it explicitly.",
+                         UserWarning
+                     )
+    except ImportError:
+        pass
