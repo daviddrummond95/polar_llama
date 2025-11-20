@@ -34,3 +34,7 @@ jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
 [dev-dependencies]
 dotenvy = "0.15"
 tokio-test = "0.4"
+
+[profile.release]
+codegen-units = 1
+lto = true
