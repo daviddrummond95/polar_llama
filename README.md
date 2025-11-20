@@ -192,6 +192,79 @@ if error:
     print(f"Raw response: {df['recommendation'].struct.field('_raw')[0]}")
 ```
 
+#### Vector Embeddings
+
+Polar Llama provides parallelized, memory-efficient embedding generation for converting text into vector representations. This is useful for semantic search, clustering, and similarity analysis:
+
+```python
+import polars as pl
+from polar_llama import embedding_async, Provider
+
+# Create a dataframe with text
+df = pl.DataFrame({
+    'text': [
+        'Machine learning is transforming AI',
+        'Natural language processing enables text understanding',
+        'Deep learning uses neural networks'
+    ]
+})
+
+# Generate embeddings in parallel
+df = df.with_columns(
+    embeddings=embedding_async(
+        pl.col('text'),
+        provider=Provider.OPENAI,
+        model='text-embedding-3-small'  # 1536 dimensions
+    )
+)
+
+# Access embedding dimensions
+df = df.with_columns(
+    dimensions=pl.col('embeddings').list.len()
+)
+
+print(df['dimensions'][0])  # 1536
+```
+
+**Using the .llama namespace:**
+```python
+df = df.with_columns(
+    embeddings=pl.col('text').llama.embedding(
+        provider=Provider.OPENAI,
+        model='text-embedding-3-small'
+    )
+)
+```
+
+**Supported Models:**
+- **OpenAI**: `text-embedding-3-small` (1536 dims), `text-embedding-3-large` (3072 dims)
+- **Gemini**: `text-embedding-004` (768 dims)
+- **AWS Bedrock**: `amazon.titan-embed-text-v1` (1536 dims)
+
+**Key Features:**
+- **Parallel Processing**: All embeddings are generated concurrently using async/await for maximum performance
+- **Memory Efficient**: Streaming approach minimizes memory footprint
+- **Type Safety**: Returns `List[Float64]` for seamless integration with Polars operations
+- **Null Handling**: Gracefully handles null values in input
+
+**Practical Example - Semantic Similarity:**
+```python
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Generate embeddings
+df = df.with_columns(
+    embeddings=embedding_async(pl.col('text'))
+)
+
+# Convert to numpy for similarity calculation
+embeddings_array = np.array(df['embeddings'].to_list())
+
+# Calculate cosine similarity matrix
+similarity_matrix = cosine_similarity(embeddings_array)
+print(similarity_matrix)
+```
+
 #### Benefits
 
 - **Speed**: Processes multiple queries in parallel, drastically reducing the time required for bulk query handling.

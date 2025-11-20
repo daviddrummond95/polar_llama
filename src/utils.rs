@@ -1,6 +1,6 @@
 use polars::prelude::*;
 use serde_json::json;
-use crate::model_client::{self, Provider, create_client, Message, ModelClientError};
+use crate::model_client::{self, Provider, create_client, create_embedding_client, Message, ModelClientError};
 
 // Remove duplicate error type - use ModelClientError from model_client instead
 pub type FetchError = ModelClientError;
@@ -298,4 +298,23 @@ pub async fn fetch_data_message_arrays_with_provider_and_schema(
 ) -> Vec<Option<String>> {
     let client = create_client(provider, model);
     model_client::fetch_data_generic_enhanced_with_schema(&*client, message_arrays, schema, model_name).await
+}
+
+// ============================================================================
+// Embedding Functions
+// ============================================================================
+
+/// Fetch embeddings with default provider (OpenAI) and model
+pub async fn fetch_embeddings(texts: &[String]) -> Vec<Option<Vec<f64>>> {
+    fetch_embeddings_with_provider(texts, Provider::OpenAI, "text-embedding-3-small").await
+}
+
+/// Fetch embeddings with specific provider and model
+pub async fn fetch_embeddings_with_provider(
+    texts: &[String],
+    provider: Provider,
+    model: &str
+) -> Vec<Option<Vec<f64>>> {
+    let client = create_embedding_client(provider, model);
+    model_client::fetch_embeddings_generic(&*client, texts).await
 }

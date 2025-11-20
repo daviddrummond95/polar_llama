@@ -4,11 +4,13 @@ use crate::model_client::{Provider, Message};
 use once_cell::sync::Lazy;
 use polars::prelude::*;
 use polars_core::prelude::CompatLevel;
+use polars_core::chunked_array::builder::ListPrimitiveChunkedBuilder;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
 use std::borrow::Cow;
 use tokio::runtime::Runtime;
 use std::str::FromStr;
+use polars::datatypes::DataType;
 
 // Initialize a global runtime for all async operations
 static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create Tokio runtime"));
@@ -359,4 +361,102 @@ fn combine_messages(inputs: &[Series]) -> PolarsResult<Series> {
     // Create chunked array from the results
     let ca = StringChunked::from_iter_options(name, result_values.into_iter());
     Ok(ca.into_series())
+}
+
+// ============================================================================
+// Embedding Expressions
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct EmbeddingKwargs {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// Get default embedding model for a given provider
+fn get_default_embedding_model(provider: Provider) -> &'static str {
+    match provider {
+        Provider::OpenAI => "text-embedding-3-small",
+        Provider::Anthropic => "text-embedding-3-small", // Fallback to OpenAI
+        Provider::Gemini => "text-embedding-004",
+        Provider::Groq => "text-embedding-3-small", // Fallback to OpenAI
+        Provider::Bedrock => "amazon.titan-embed-text-v1",
+    }
+}
+
+// Register the asynchronous embedding function with Polars
+#[polars_expr(output_type_func=embedding_output_type)]
+fn embedding_async(inputs: &[Series], kwargs: EmbeddingKwargs) -> PolarsResult<Series> {
+    let input_series = &inputs[0];
+
+    // Handle empty series or null dtype
+    if input_series.is_empty() || input_series.dtype() == &DataType::Null {
+        let mut builder = ListPrimitiveChunkedBuilder::<Float64Type>::new(
+            input_series.name().clone(),
+            0,
+            0,
+            DataType::Float64,
+        );
+        return Ok(builder.finish().into_series());
+    }
+
+    let ca: &StringChunked = input_series.str()?;
+
+    // Collect all texts, keeping track of their original indices
+    let mut texts_with_indices: Vec<(usize, String)> = Vec::new();
+    for (idx, opt_value) in ca.into_iter().enumerate() {
+        if let Some(value) = opt_value {
+            texts_with_indices.push((idx, value.to_owned()));
+        }
+    }
+
+    // Extract just the texts for the API calls
+    let texts: Vec<String> = texts_with_indices.iter().map(|(_, text)| text.clone()).collect();
+
+    // Determine provider and model
+    let provider = match &kwargs.provider {
+        Some(provider_str) => parse_provider(provider_str).unwrap_or(Provider::OpenAI),
+        None => Provider::OpenAI,
+    };
+
+    let model = kwargs
+        .model
+        .unwrap_or_else(|| get_default_embedding_model(provider).to_string());
+
+    // Fetch embeddings in parallel
+    let api_results = RT.block_on(fetch_embeddings_with_provider(&texts, provider, &model));
+
+    // Map results back to original positions
+    let mut results: Vec<Option<Vec<f64>>> = vec![None; ca.len()];
+    for ((idx, _), result) in texts_with_indices.iter().zip(api_results.iter()) {
+        results[*idx] = result.clone();
+    }
+
+    // Convert Vec<Option<Vec<f64>>> to a Series with List<Float64> dtype
+    let mut builder = ListPrimitiveChunkedBuilder::<Float64Type>::new(
+        ca.name().clone(),
+        ca.len(),
+        1536, // Initial capacity for inner values (typical embedding size)
+        DataType::Float64,
+    );
+
+    for opt_embedding in results {
+        if let Some(embedding) = opt_embedding {
+            builder.append_slice(&embedding);
+        } else {
+            builder.append_null();
+        }
+    }
+
+    Ok(builder.finish().into_series())
+}
+
+/// Output type function for embedding_async
+fn embedding_output_type(_input_fields: &[Field]) -> PolarsResult<Field> {
+    Ok(Field::new(
+        PlSmallStr::from_static(""),
+        DataType::List(Box::new(DataType::Float64)),
+    ))
 }

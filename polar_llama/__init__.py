@@ -569,6 +569,87 @@ def combine_messages(*exprs: IntoExpr) -> pl.Expr:
     )
 
 
+def embedding_async(
+    expr: IntoExpr,
+    *,
+    provider: Optional[Union[str, Provider]] = None,
+    model: Optional[str] = None,
+) -> pl.Expr:
+    """
+    Asynchronously generate embeddings for the given text expressions.
+
+    This function generates vector embeddings for text using various embedding providers.
+    The embeddings are computed in parallel for maximum performance and memory efficiency.
+
+    Parameters
+    ----------
+    expr : polars.Expr
+        The text expression to generate embeddings for
+    provider : str or Provider, optional
+        The provider to use (OpenAI, Gemini, Bedrock). Default: OpenAI
+    model : str, optional
+        The embedding model name to use. If not specified, uses the default
+        model for the provider:
+        - OpenAI: "text-embedding-3-small" (1536 dimensions)
+        - Gemini: "text-embedding-004" (768 dimensions)
+        - Bedrock: "amazon.titan-embed-text-v1" (1536 dimensions)
+
+    Returns
+    -------
+    polars.Expr
+        Expression with embeddings as List[Float64] (vector of floats)
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from polar_llama import embedding_async, Provider
+    >>>
+    >>> # Create a dataframe with text
+    >>> df = pl.DataFrame({
+    ...     "text": ["Hello world", "Machine learning is fun"]
+    ... })
+    >>>
+    >>> # Generate embeddings using OpenAI (default)
+    >>> result = df.with_columns(
+    ...     embeddings=embedding_async(pl.col("text"))
+    ... )
+    >>>
+    >>> # Use a specific provider and model
+    >>> result = df.with_columns(
+    ...     embeddings=embedding_async(
+    ...         pl.col("text"),
+    ...         provider=Provider.OPENAI,
+    ...         model="text-embedding-3-large"
+    ...     )
+    ... )
+    >>>
+    >>> # Access the embedding dimensions
+    >>> result.select([
+    ...     "text",
+    ...     pl.col("embeddings").list.len().alias("dimensions")
+    ... ])
+    """
+    expr = parse_into_expr(expr)
+    kwargs = {}
+
+    if provider is not None:
+        # Convert Provider to string to make it picklable
+        if isinstance(provider, Provider):
+            provider = str(provider)
+        kwargs["provider"] = provider
+
+    if model is not None:
+        kwargs["model"] = model
+
+    return register_plugin(
+        args=[expr],
+        symbol="embedding_async",
+        is_elementwise=True,
+        lib=lib,
+        kwargs=kwargs,
+    )
+
+
 def tag_taxonomy(
     expr: IntoExpr,
     taxonomy: Dict[str, Dict[str, Any]],
@@ -816,6 +897,33 @@ class LlamaNamespace:
         return tag_taxonomy(
             self._expr,
             taxonomy,
+            provider=provider,
+            model=model
+        )
+
+    def embedding(
+        self,
+        *,
+        provider: Optional[Union[str, Provider]] = None,
+        model: Optional[str] = None,
+    ) -> pl.Expr:
+        """
+        Generate embeddings for the expression using an embedding model.
+
+        Parameters
+        ----------
+        provider : str or Provider, optional
+            The provider to use
+        model : str, optional
+            The model name to use
+
+        Returns
+        -------
+        polars.Expr
+            Expression with embeddings as List[Float64]
+        """
+        return embedding_async(
+            self._expr,
             provider=provider,
             model=model
         )
