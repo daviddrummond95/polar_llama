@@ -5,5 +5,14 @@ target
 uv.lock
 Cargo.lock
 PARALLELIZATION.md
-Cargo.lock
 test_output.txt
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test scripts (temporary validation files)
+test_docs_real.py
+test_documentation_examples.py
+validate_docs_syntax.py

@@ -23,6 +23,85 @@ env:
   RUSTFLAGS: "-Dwarnings"
 
 jobs:
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Set up Rust
+        run: rustup show
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
+      - name: Check for Python dependency vulnerabilities
+        run: |
+          python -m pip install --upgrade pip
+          pip install safety
+          pip install -r requirements.txt
+          # Run safety check (allow to fail for now, but show results)
+          safety check || true
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Set up Rust
+        run: rustup show
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install virtualenv
+          python -m virtualenv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
+          pip install pytest pytest-cov python-dotenv
+
+      - name: Build package
+        run: |
+          source .venv/bin/activate
+          maturin develop --release
+
+      - name: Run Rust coverage
+        run: |
+          # Run cargo-tarpaulin for Rust code coverage
+          cargo tarpaulin --out Xml --output-dir ./coverage --skip-clean --exclude-files 'tests/*' || true
+
+      - name: Run Python coverage
+        run: |
+          source .venv/bin/activate
+          # Run pytest with coverage
+          pytest tests --cov=polar_llama --cov-report=xml:coverage/python-coverage.xml --cov-report=term --ignore=tests/test_parallel_inference.py || true
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage/cobertura.xml,./coverage/python-coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: coverage/
+
   linux_tests:
     runs-on: ubuntu-latest
     strategy:
