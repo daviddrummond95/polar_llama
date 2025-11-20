@@ -2085,7 +2085,7 @@ dependencies = [
  "polars-arrow",
  "polars-core",
  "pyo3",
- "pyo3-build-config 0.21.2",
+ "pyo3-build-config",
  "pyo3-polars",
  "reqwest",
  "serde",
@@ -2662,20 +2662,10 @@ dependencies = [
  "memoffset",
  "once_cell",
  "portable-atomic",
- "pyo3-build-config 0.23.5",
+ "pyo3-build-config",
  "pyo3-ffi",
  "pyo3-macros",
  "unindent",
-]
-
-[[package]]
-name = "pyo3-build-config"
-version = "0.21.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7883df5835fafdad87c0d888b266c8ec0f4c9ca48a5bed6bbb592e8dedee1b50"
-dependencies = [
- "once_cell",
- "target-lexicon",
 ]
 
 [[package]]
@@ -2695,7 +2685,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9f1b4c431c0bb1c8fb0a338709859eed0d030ff6daa34368d3b152a63dfdd8d"
 dependencies = [
  "libc",
- "pyo3-build-config 0.23.5",
+ "pyo3-build-config",
 ]
 
 [[package]]
@@ -2718,7 +2708,7 @@ checksum = "fca6726ad0f3da9c9de093d6f116a93c1a38e417ed73bf138472cf4064f72028"
 dependencies = [
  "heck",
  "proc-macro2",
- "pyo3-build-config 0.23.5",
+ "pyo3-build-config",
  "quote",
  "syn",
 ]
