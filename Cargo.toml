@@ -34,6 +34,8 @@ async-trait = "0.1"
 aws-config = "1.1.0"
 aws-sdk-bedrockruntime = "1.116.0"
 jsonschema = "0.28"
+# Approximate nearest neighbor search using HNSW
+instant-distance = { version = "0.6", features = ["with-serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }

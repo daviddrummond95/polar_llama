@@ -219,6 +219,45 @@ pub trait ModelClient {
     }
 }
 
+/// Trait for embedding providers
+#[async_trait]
+pub trait EmbeddingClient {
+    /// Get the provider enum
+    fn provider(&self) -> Provider;
+
+    /// The name of the client provider
+    fn provider_name(&self) -> &str {
+        self.provider().as_str()
+    }
+
+    /// The API endpoint for embeddings
+    fn embedding_endpoint(&self) -> String;
+
+    /// The embedding model name to use
+    fn embedding_model(&self) -> &str;
+
+    /// Get the dimensions of the embedding vectors
+    fn embedding_dimensions(&self) -> usize;
+
+    /// Generate embeddings for a batch of texts
+    async fn generate_embeddings(
+        &self,
+        client: &Client,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f64>>, ModelClientError>;
+
+    /// Get the API key for this provider
+    fn get_api_key(&self) -> String {
+        match self.provider() {
+            Provider::OpenAI => std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            Provider::Anthropic => std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+            Provider::Gemini => std::env::var("GEMINI_API_KEY").unwrap_or_default(),
+            Provider::Groq => std::env::var("GROQ_API_KEY").unwrap_or_default(),
+            Provider::Bedrock => String::new(), // Bedrock uses AWS credentials
+        }
+    }
+}
+
 /// Validate JSON response against a JSON schema
 pub fn validate_json_schema(response: &str, schema_str: &str) -> Result<(), String> {
     // Parse the response as JSON
@@ -455,16 +494,55 @@ pub async fn example_usage(messages: &[String], provider_str: &str, model: &str)
 
 /// Enhanced example function supporting message arrays
 pub async fn example_usage_enhanced(
-    message_arrays: &[Vec<Message>], 
-    provider_str: &str, 
+    message_arrays: &[Vec<Message>],
+    provider_str: &str,
     model: &str
 ) -> Vec<Option<String>> {
     // Parse provider string to Provider enum
     let provider = Provider::from_str(provider_str).unwrap_or(Provider::OpenAI);
-    
+
     // Create appropriate client with specified model
     let client = create_client(provider, model);
-    
+
     // Use client with enhanced generic fetch function
     fetch_data_generic_enhanced(&*client, message_arrays).await
+}
+
+/// Parallel embedding generation function
+/// Uses futures::join_all for memory-efficient parallel processing
+pub async fn fetch_embeddings_generic<T: EmbeddingClient + Sync + ?Sized>(
+    client: &T,
+    texts: &[String]
+) -> Vec<Option<Vec<f64>>> {
+    let reqwest_client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
+    // Process each text individually for parallelization
+    let fetch_tasks = texts.iter().map(|text| {
+        let text_batch = vec![text.clone()];
+        let reqwest_client = &reqwest_client;
+
+        async move {
+            match client.generate_embeddings(reqwest_client, &text_batch).await {
+                Ok(embeddings) => embeddings.into_iter().next(),
+                Err(e) => {
+                    eprintln!("Error generating embedding from {}: {}", client.provider_name(), e);
+                    None
+                }
+            }
+        }
+    }).collect::<Vec<_>>();
+
+    futures::future::join_all(fetch_tasks).await
+}
+
+/// Create an embedding client for the given provider and model
+pub fn create_embedding_client(provider: Provider, model: &str) -> Box<dyn EmbeddingClient + Send + Sync> {
+    match provider {
+        Provider::OpenAI => Box::new(openai::OpenAIEmbeddingClient::new_with_model(model)),
+        // Other providers can be added here as they're implemented
+        _ => Box::new(openai::OpenAIEmbeddingClient::new_with_model(model)),
+    }
 } 
