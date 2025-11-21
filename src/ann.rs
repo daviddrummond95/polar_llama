@@ -41,10 +41,10 @@ pub fn build_hnsw_index(embeddings: Vec<Vec<f64>>) -> HnswMap<EmbeddingPoint, us
 /// Search for k nearest neighbors in the HNSW index
 pub fn search_hnsw(
     index: &HnswMap<EmbeddingPoint, usize>,
-    query: &Vec<f64>,
+    query: &[f64],
     k: usize,
 ) -> Vec<(usize, f32)> {
-    let query_point = EmbeddingPoint(query.clone());
+    let query_point = EmbeddingPoint(query.to_vec());
     let mut search = Search::default();
 
     index
