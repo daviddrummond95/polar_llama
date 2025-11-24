@@ -50,6 +50,43 @@ ensure_expressions_registered()
 # Update the lib path to make sure we're using the actual library
 lib = get_lib_path()
 
+# Import taxonomy refinement utilities
+try:
+    from polar_llama.taxonomy_refinement import (
+        analyze_taxonomy_error,
+        refine_taxonomy,
+        analyze_all_errors,
+        aggregate_error_feedback
+    )
+except ImportError:
+    # Taxonomy refinement is optional
+    analyze_taxonomy_error = None
+    refine_taxonomy = None
+    analyze_all_errors = None
+    aggregate_error_feedback = None
+
+# Import label-first taxonomy utilities
+try:
+    from polar_llama.label_first_taxonomy import (
+        explain_label_choice,
+        generate_taxonomy_from_labels
+    )
+except ImportError:
+    # Label-first taxonomy is optional
+    explain_label_choice = None
+    generate_taxonomy_from_labels = None
+
+# Import hierarchical taxonomy utilities
+try:
+    from polar_llama.hierarchical_taxonomy import (
+        suggest_taxonomy_hierarchy,
+        tag_hierarchical_taxonomy
+    )
+except ImportError:
+    # Hierarchical taxonomy is optional
+    suggest_taxonomy_hierarchy = None
+    tag_hierarchical_taxonomy = None
+
 def _pydantic_to_json_schema(model: Type['BaseModel']) -> dict:
     """Convert a Pydantic model to JSON schema."""
     try:
@@ -883,6 +920,7 @@ def tag_taxonomy(
     *,
     provider: Optional[Union[str, Provider]] = None,
     model: Optional[str] = None,
+    split_fields: Optional[Union[bool, int]] = None,
 ) -> pl.Expr:
     """
     Tag documents according to a taxonomy definition with detailed reasoning.
@@ -918,6 +956,12 @@ def tag_taxonomy(
         The LLM provider to use (OpenAI, Anthropic, Gemini, Groq, Bedrock)
     model : str, optional
         The specific model name to use
+    split_fields : bool or int, optional
+        Whether to split taxonomy fields into multiple API calls.
+        - If True, splits into individual field calls (1 field per call)
+        - If int > 0, splits into chunks of that size (e.g., 2 = 2 fields per call)
+        - If None/False, processes all fields in a single call (default)
+        Splitting can improve reliability with smaller models but increases API calls.
 
     Returns
     -------
@@ -981,37 +1025,93 @@ def tag_taxonomy(
     ...     pl.col("tags").struct.field("urgency").struct.field("value").alias("urgency")
     ... ])
     """
-    # Create the Pydantic model from the taxonomy
-    response_model = _create_taxonomy_pydantic_model(taxonomy)
+    # Determine if we should split fields
+    if split_fields is None or split_fields is False:
+        # Process all fields in one call (original behavior)
+        response_model = _create_taxonomy_pydantic_model(taxonomy)
+        system_prompt = _create_taxonomy_prompt(taxonomy, document_field_name="document")
+        doc_expr = parse_into_expr(expr)
 
-    # Create the system prompt with taxonomy instructions
-    system_prompt = _create_taxonomy_prompt(taxonomy, document_field_name="document")
+        system_message_expr = doc_expr.map_batches(
+            lambda s: pl.Series([system_prompt] * len(s)),
+            return_dtype=pl.Utf8
+        ).pipe(string_to_message, message_type="system")
 
-    # Parse the document expression
-    doc_expr = parse_into_expr(expr)
+        user_message_expr = doc_expr.pipe(
+            string_to_message, message_type="user"
+        )
 
-    # Create a system message for each row by mapping over the document column
-    # This ensures the system message is broadcast to match the number of rows
-    system_message_expr = doc_expr.map_batches(
-        lambda s: pl.Series([system_prompt] * len(s)),
-        return_dtype=pl.Utf8
-    ).pipe(string_to_message, message_type="system")
+        messages_expr = combine_messages(system_message_expr, user_message_expr)
 
-    # Create a user message with the document
-    user_message_expr = doc_expr.pipe(
-        string_to_message, message_type="user"
-    )
+        return inference_messages(
+            messages_expr,
+            provider=provider,
+            model=model,
+            response_model=response_model
+        )
 
-    # Combine the messages
-    messages_expr = combine_messages(system_message_expr, user_message_expr)
+    else:
+        # Split fields into multiple calls
+        # Determine chunk size
+        if split_fields is True:
+            chunk_size = 1  # One field per call
+        else:
+            chunk_size = int(split_fields)
 
-    # Call inference_messages with the structured output model
-    return inference_messages(
-        messages_expr,
-        provider=provider,
-        model=model,
-        response_model=response_model
-    )
+        if chunk_size <= 0:
+            raise ValueError("split_fields must be True or a positive integer")
+
+        # Split taxonomy into chunks
+        taxonomy_items = list(taxonomy.items())
+        chunks = [
+            dict(taxonomy_items[i:i + chunk_size])
+            for i in range(0, len(taxonomy_items), chunk_size)
+        ]
+
+        # Process each chunk separately
+        chunk_results = []
+        for chunk_taxonomy in chunks:
+            response_model = _create_taxonomy_pydantic_model(chunk_taxonomy)
+            system_prompt = _create_taxonomy_prompt(chunk_taxonomy, document_field_name="document")
+            doc_expr = parse_into_expr(expr)
+
+            system_message_expr = doc_expr.map_batches(
+                lambda s: pl.Series([system_prompt] * len(s)),
+                return_dtype=pl.Utf8
+            ).pipe(string_to_message, message_type="system")
+
+            user_message_expr = doc_expr.pipe(
+                string_to_message, message_type="user"
+            )
+
+            messages_expr = combine_messages(system_message_expr, user_message_expr)
+
+            chunk_result = inference_messages(
+                messages_expr,
+                provider=provider,
+                model=model,
+                response_model=response_model
+            )
+            chunk_results.append(chunk_result)
+
+        # Combine all chunk results into a single struct
+        # Each chunk_result is already a struct, we need to merge their fields
+        if len(chunk_results) == 1:
+            return chunk_results[0]
+
+        # Use struct merge to combine all fields
+        # Start with the first result and merge in the rest
+        combined = chunk_results[0]
+        for i in range(1, len(chunk_results)):
+            # Get all field names from current chunk
+            chunk_fields = list(chunks[i].keys())
+            # Add each field from the chunk to the combined result
+            for field_name in chunk_fields:
+                combined = combined.struct.with_fields(
+                    **{field_name: chunk_results[i].struct.field(field_name)}
+                )
+
+        return combined
 
 
 # ============================================================================
