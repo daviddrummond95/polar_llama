@@ -32,7 +32,7 @@ tokio = { version = "1.41", features = ["full", "rt-multi-thread"] }
 once_cell = "1"
 async-trait = "0.1"
 aws-config = "1.1.0"
-aws-sdk-bedrockruntime = "1.116.0"
+aws-sdk-bedrockruntime = "1.118.0"
 jsonschema = "0.28"
 # Approximate nearest neighbor search using HNSW
 instant-distance = { version = "0.6", features = ["with-serde"] }
