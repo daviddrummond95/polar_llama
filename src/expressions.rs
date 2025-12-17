@@ -1,6 +1,7 @@
 #![allow(clippy::unused_unit)]
 use crate::utils::*;
 use crate::model_client::{Provider, Message};
+use crate::cost;
 use once_cell::sync::Lazy;
 use polars::prelude::*;
 use polars_core::prelude::CompatLevel;
@@ -806,4 +807,151 @@ fn knn_output_type(_input_fields: &[Field]) -> PolarsResult<Field> {
         PlSmallStr::from_static(""),
         DataType::List(Box::new(DataType::Int64)),
     ))
+}
+
+// ============================================================================
+// Cost Calculation Operations
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct TokenCountKwargs {
+    /// The model to use for token counting (affects tokenizer selection).
+    /// Defaults to "gpt-4" which uses cl100k_base tokenizer.
+    #[serde(default = "default_token_model")]
+    model: String,
+}
+
+fn default_token_model() -> String {
+    "gpt-4".to_string()
+}
+
+/// Count the number of tokens in each text string.
+///
+/// Uses tiktoken tokenizers:
+/// - o200k_base for GPT-4o and o1 models
+/// - cl100k_base for all other models (GPT-4, GPT-3.5, Claude, Llama, etc.)
+///
+/// # Arguments
+/// * `model` - The model name to determine which tokenizer to use.
+///             Defaults to "gpt-4" (cl100k_base tokenizer).
+///
+/// # Returns
+/// A UInt64 series with token counts for each input row.
+#[polars_expr(output_type=UInt64)]
+fn count_tokens(inputs: &[Series], kwargs: TokenCountKwargs) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let model = &kwargs.model;
+
+    let out: UInt64Chunked = ca
+        .into_iter()
+        .map(|opt_value| opt_value.map(|value| cost::count_tokens(value, model) as u64))
+        .collect();
+
+    Ok(out.into_series())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CostKwargs {
+    /// The provider name (openai, anthropic, gemini, groq, bedrock)
+    #[serde(default = "default_cost_provider")]
+    provider: String,
+    /// The model name for pricing lookup
+    #[serde(default = "default_cost_model")]
+    model: String,
+}
+
+fn default_cost_provider() -> String {
+    "openai".to_string()
+}
+
+fn default_cost_model() -> String {
+    "gpt-4-turbo".to_string()
+}
+
+/// Calculate the input cost in USD for each text string based on token count.
+///
+/// Uses tiktoken for token counting and embedded pricing data for cost calculation.
+/// Prices are based on published rates per 1 million tokens.
+///
+/// # Arguments
+/// * `provider` - The provider name: "openai", "anthropic", "gemini", "groq", or "bedrock".
+///                Defaults to "openai".
+/// * `model` - The model name for pricing lookup (e.g., "gpt-4o", "claude-3-opus-20240229").
+///             Defaults to "gpt-4-turbo".
+///
+/// # Returns
+/// A Float64 series with input costs in USD for each row.
+/// Returns null for rows where pricing is not available.
+///
+/// # Example
+/// ```python
+/// import polars as pl
+///
+/// df = pl.DataFrame({"text": ["Hello world", "This is a longer prompt"]})
+/// df.with_columns(
+///     cost=pl.col("text").llama.calculate_input_cost(provider="openai", model="gpt-4o")
+/// )
+/// # Sum total cost
+/// total_cost = df.select(pl.col("cost").sum())
+/// ```
+#[polars_expr(output_type=Float64)]
+fn calculate_input_cost(inputs: &[Series], kwargs: CostKwargs) -> PolarsResult<Series> {
+    let ca: &StringChunked = inputs[0].str()?;
+    let model = &kwargs.model;
+    let provider_str = &kwargs.provider;
+
+    // Parse provider
+    let provider = parse_provider(provider_str).unwrap_or(Provider::OpenAI);
+
+    // Get pricing for this provider/model combination
+    let pricing = cost::get_pricing(provider, model);
+
+    let out: Float64Chunked = ca
+        .into_iter()
+        .map(|opt_value| {
+            opt_value.and_then(|value| {
+                pricing.map(|p| {
+                    let token_count = cost::count_tokens(value, model);
+                    p.calculate_input_cost(token_count)
+                })
+            })
+        })
+        .collect();
+
+    Ok(out.into_series())
+}
+
+/// Calculate the input cost from a pre-computed token count column.
+///
+/// This is more efficient when you've already counted tokens and want to
+/// calculate costs for multiple models without re-tokenizing.
+///
+/// # Arguments
+/// * `provider` - The provider name: "openai", "anthropic", "gemini", "groq", or "bedrock".
+/// * `model` - The model name for pricing lookup.
+///
+/// # Returns
+/// A Float64 series with input costs in USD for each row.
+#[polars_expr(output_type=Float64)]
+fn calculate_cost_from_tokens(inputs: &[Series], kwargs: CostKwargs) -> PolarsResult<Series> {
+    let ca: &UInt64Chunked = inputs[0].u64()?;
+    let model = &kwargs.model;
+    let provider_str = &kwargs.provider;
+
+    // Parse provider
+    let provider = parse_provider(provider_str).unwrap_or(Provider::OpenAI);
+
+    // Get pricing for this provider/model combination
+    let pricing = cost::get_pricing(provider, model);
+
+    let out: Float64Chunked = ca
+        .into_iter()
+        .map(|opt_value| {
+            opt_value.and_then(|token_count| {
+                pricing.map(|p| p.calculate_input_cost(token_count as usize))
+            })
+        })
+        .collect();
+
+    Ok(out.into_series())
 }
