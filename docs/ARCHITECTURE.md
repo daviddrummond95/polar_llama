@@ -60,7 +60,7 @@ graph TB
     end
 
     User -->|DataFrame Operations| Polars
-    Polars -->|.invoke() / .pl.col()| PyExpr
+    Polars -->|".invoke / .pl.col"| PyExpr
     PyExpr -->|PyO3 Binding| PyModule
     PyModule -->|Register Expressions| Expr
     Expr -->|Async Execution| Runtime
