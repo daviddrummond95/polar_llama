@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.2] - 2025-12-17
 
 ### Added
+- **LLM cost calculation** with tiktoken tokenization for accurate token counting and cost estimation
+- **Vector embeddings** (`embedding_async`) - Parallelized, memory-efficient embedding generation
+  - Support for OpenAI, Gemini, and AWS Bedrock embedding models
+  - Streaming approach for minimal memory footprint
+- **Vector similarity functions** for high-performance vector operations:
+  - `cosine_similarity` - Measure angle between vectors
+  - `dot_product` - Calculate dot product
+  - `euclidean_distance` - Calculate straight-line distance
+- **Approximate Nearest Neighbor (ANN) search** via HNSW algorithm (`knn_hnsw`)
+  - Sub-linear O(log N) search time
+  - High recall rates (>95% typical)
+  - Scalable to millions of vectors
 - Comprehensive repository grading rubric and documentation improvements
 - CODE_OF_CONDUCT.md for community guidelines
 - SECURITY.md for vulnerability reporting
@@ -18,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependency scanning with Dependabot and cargo-audit
 - Code coverage reporting in CI pipeline
 - `.cargo/audit.toml` configuration for documented security exceptions
+
+### Fixed
+- Struct schema inference for Pydantic models with Optional fields
+- Mermaid flowchart rendering in documentation
 
 ### Security
 - **Fixed RUSTSEC-2025-0024**: Updated crossbeam-channel from 0.5.14 to 0.5.15 (double free on Drop)
