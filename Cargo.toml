@@ -36,6 +36,8 @@ aws-sdk-bedrockruntime = "1.116.0"
 jsonschema = "0.28"
 # Approximate nearest neighbor search using HNSW
 instant-distance = { version = "0.6", features = ["with-serde"] }
+# Token counting for cost calculation (tiktoken compatible)
+tiktoken-rs = "0.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
