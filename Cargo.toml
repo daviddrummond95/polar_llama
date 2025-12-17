@@ -22,7 +22,7 @@ serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 polars = { version = "0.46.0", default-features = false }
 polars-arrow = { version = "0.46.0", default-features = false }
-polars-core = { version = "0.46.0", default-features = false }
+polars-core = { version = "0.52.0", default-features = false }
 # Updated futures to avoid yanked version
 futures = "0.3.31"
 # Updated ureq from 0.11 to 2.x to fix rustls 0.16 vulnerabilities
