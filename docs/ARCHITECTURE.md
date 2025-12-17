@@ -60,7 +60,7 @@ graph TB
     end
 
     User -->|DataFrame Operations| Polars
-    Polars -->|.invoke() / .pl.col()| PyExpr
+    Polars -->|invoke / pl.col| PyExpr
     PyExpr -->|PyO3 Binding| PyModule
     PyModule -->|Register Expressions| Expr
     Expr -->|Async Execution| Runtime
@@ -144,7 +144,7 @@ graph LR
     lib --> utils[utils.rs]
     lib --> mc[model_client/]
 
-    mc --> trait[mod.rs<br/>ModelClient Trait]
+    mc --> trait["mod.rs (ModelClient Trait)"]
     mc --> openai[openai.rs]
     mc --> anthropic[anthropic.rs]
     mc --> gemini[gemini.rs]
