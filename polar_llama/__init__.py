@@ -83,6 +83,31 @@ def _pydantic_to_json_schema(model: Type['BaseModel']) -> dict:
     except ImportError:
         raise ImportError("Pydantic is required for structured outputs. Install with: pip install pydantic>=2.0.0")
 
+def _extract_type_from_anyof(any_of: list, root_schema: dict) -> tuple:
+    """
+    Extract the non-null type from an anyOf pattern (used for Optional fields).
+
+    Returns a tuple of (type_string, type_schema) where type_schema contains
+    the full schema for complex types like arrays or objects.
+    """
+    for option in any_of:
+        # Handle $ref in anyOf options
+        if "$ref" in option:
+            ref_path = option["$ref"]
+            if ref_path.startswith("#/"):
+                ref_parts = ref_path[2:].split("/")
+                ref_schema = root_schema
+                for part in ref_parts:
+                    ref_schema = ref_schema.get(part, {})
+                return (ref_schema.get("type", "object"), ref_schema)
+
+        option_type = option.get("type")
+        if option_type and option_type != "null":
+            return (option_type, option)
+
+    return ("string", {})  # Default fallback
+
+
 def _json_schema_to_polars_dtype(schema: dict, root_schema: dict = None) -> pl.DataType:
     """Convert a JSON schema to a Polars DataType."""
     # Keep reference to root schema for resolving $ref
@@ -93,58 +118,7 @@ def _json_schema_to_polars_dtype(schema: dict, root_schema: dict = None) -> pl.D
 
     fields = []
     for field_name, field_schema in properties.items():
-        # Handle $ref references
-        if "$ref" in field_schema:
-            # Extract the reference path (e.g., "#/$defs/SentimentResult")
-            ref_path = field_schema["$ref"]
-            if ref_path.startswith("#/"):
-                # Navigate to the referenced schema
-                ref_parts = ref_path[2:].split("/")
-                ref_schema = root_schema
-                for part in ref_parts:
-                    ref_schema = ref_schema.get(part, {})
-                # Recursively convert the referenced schema
-                pl_type = _json_schema_to_polars_dtype(ref_schema, root_schema)
-            else:
-                # Unknown reference format, default to string
-                pl_type = pl.Utf8
-        else:
-            field_type = field_schema.get("type")
-
-            # Map JSON schema types to Polars types
-            if field_type == "string":
-                pl_type = pl.Utf8
-            elif field_type == "integer":
-                pl_type = pl.Int64
-            elif field_type == "number":
-                pl_type = pl.Float64
-            elif field_type == "boolean":
-                pl_type = pl.Boolean
-            elif field_type == "array":
-                # Handle arrays - use List type
-                items_schema = field_schema.get("items", {})
-                items_type = items_schema.get("type", "string")
-                if items_type == "string":
-                    pl_type = pl.List(pl.Utf8)
-                elif items_type == "integer":
-                    pl_type = pl.List(pl.Int64)
-                elif items_type == "number":
-                    pl_type = pl.List(pl.Float64)
-                else:
-                    pl_type = pl.List(pl.Utf8)  # Default to string list
-            elif field_type == "object":
-                # Check if this is a Dict[str, str] type (has additionalProperties)
-                if "additionalProperties" in field_schema and field_schema["additionalProperties"] != False:
-                    # This is a dictionary type, just use Utf8 for now
-                    # (Polars doesn't have a good way to represent arbitrary dicts in structs)
-                    pl_type = pl.Utf8
-                else:
-                    # Nested objects - recursively convert
-                    pl_type = _json_schema_to_polars_dtype(field_schema, root_schema)
-            else:
-                # Default to string for unknown types
-                pl_type = pl.Utf8
-
+        pl_type = _field_schema_to_polars_dtype(field_schema, root_schema)
         fields.append(pl.Field(field_name, pl_type))
 
     # Add error fields for error handling (only at the root level)
@@ -155,18 +129,89 @@ def _json_schema_to_polars_dtype(schema: dict, root_schema: dict = None) -> pl.D
 
     return pl.Struct(fields)
 
-def _parse_json_to_struct(json_str_series: pl.Series, dtype: pl.DataType) -> pl.Series:
-    """Parse a JSON string series into a struct series."""
-    # Use Polars' built-in JSON parsing
-    try:
-        # First, try to decode as JSON
-        parsed = json_str_series.str.json_decode()
 
-        # Cast to the target struct type to ensure field types match
-        return parsed.cast(dtype, strict=False)
+def _field_schema_to_polars_dtype(field_schema: dict, root_schema: dict) -> pl.DataType:
+    """Convert a single field's JSON schema to a Polars DataType."""
+    # Handle $ref references
+    if "$ref" in field_schema:
+        ref_path = field_schema["$ref"]
+        if ref_path.startswith("#/"):
+            ref_parts = ref_path[2:].split("/")
+            ref_schema = root_schema
+            for part in ref_parts:
+                ref_schema = ref_schema.get(part, {})
+            return _json_schema_to_polars_dtype(ref_schema, root_schema)
+        else:
+            return pl.Utf8  # Unknown reference format
+
+    # Handle anyOf patterns (used for Optional fields in Pydantic v2)
+    if "anyOf" in field_schema:
+        field_type, type_schema = _extract_type_from_anyof(field_schema["anyOf"], root_schema)
+        # Create a temporary field_schema with the extracted type info
+        field_schema = {**type_schema, "type": field_type}
+
+    field_type = field_schema.get("type")
+
+    # Handle type arrays like ["string", "null"] (alternative Optional format)
+    if isinstance(field_type, list):
+        # Find the non-null type
+        for t in field_type:
+            if t != "null":
+                field_type = t
+                break
+        else:
+            field_type = "string"  # Default if only null
+
+    # Map JSON schema types to Polars types
+    if field_type == "string":
+        return pl.Utf8
+    elif field_type == "integer":
+        return pl.Int64
+    elif field_type == "number":
+        return pl.Float64
+    elif field_type == "boolean":
+        return pl.Boolean
+    elif field_type == "array":
+        # Handle arrays - use List type
+        items_schema = field_schema.get("items", {})
+        if items_schema:
+            items_dtype = _field_schema_to_polars_dtype(items_schema, root_schema)
+            return pl.List(items_dtype)
+        return pl.List(pl.Utf8)  # Default to string list
+    elif field_type == "object":
+        # Check if this is a Dict[str, str] type (has additionalProperties)
+        if "additionalProperties" in field_schema and field_schema["additionalProperties"] != False:
+            # This is a dictionary type, just use Utf8 for now
+            # (Polars doesn't have a good way to represent arbitrary dicts in structs)
+            return pl.Utf8
+        else:
+            # Nested objects - recursively convert
+            return _json_schema_to_polars_dtype(field_schema, root_schema)
+    else:
+        # Default to string for unknown types
+        return pl.Utf8
+
+def _parse_json_to_struct(json_str_series: pl.Series, dtype: pl.DataType) -> pl.Series:
+    """Parse a JSON string series into a struct series.
+
+    The dtype parameter is critical - it ensures Polars uses the schema derived
+    from the Pydantic model rather than inferring from data. This fixes issues
+    with Optional fields that may be null in some rows but present in others.
+    """
+    # Pass the dtype to json_decode to use the Pydantic-derived schema
+    # instead of inferring from data. This ensures Optional fields are
+    # always included even when null in early rows.
+    try:
+        return json_str_series.str.json_decode(dtype=dtype)
     except Exception:
-        # If parsing fails, return the series as-is (will contain error objects)
-        return json_str_series.str.json_decode()
+        # If parsing fails with schema, try without and cast
+        # This handles edge cases where the response doesn't match schema
+        try:
+            parsed = json_str_series.str.json_decode()
+            return parsed.cast(dtype, strict=False)
+        except Exception:
+            # Last resort: return inferred schema
+            return json_str_series.str.json_decode()
 
 
 # ============================================================================
