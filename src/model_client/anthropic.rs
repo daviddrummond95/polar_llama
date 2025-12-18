@@ -1,8 +1,25 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
 use super::{ModelClient, ModelClientError, Message, Provider};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use reqwest::Client;
+
+/// System content block with optional cache_control for Anthropic
+#[derive(Debug, Clone, Serialize)]
+struct SystemContentBlock {
+    #[serde(rename = "type")]
+    content_type: String,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControlMarker>,
+}
+
+/// Cache control marker for Anthropic's prompt caching
+#[derive(Debug, Clone, Serialize)]
+struct CacheControlMarker {
+    #[serde(rename = "type")]
+    cache_type: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -106,10 +123,9 @@ impl ModelClient for AnthropicClient {
     }
     
     fn format_request_body(&self, messages: &[Message], schema: Option<&str>, model_name: Option<&str>) -> Value {
-        // Extract system message if present
-        let system = messages.iter()
-            .find(|msg| msg.role == "system")
-            .map(|msg| msg.content.clone());
+        // Check if any system message has cache_control
+        let has_cache_control = messages.iter()
+            .any(|msg| msg.role == "system" && msg.cache_control.is_some());
 
         // Format messages (excluding system)
         let formatted_messages = self.format_messages(messages);
@@ -121,9 +137,30 @@ impl ModelClient for AnthropicClient {
             "max_tokens": 4096
         });
 
-        // Add system parameter if we found a system message
-        if let Some(system_content) = system {
-            request["system"] = json!(system_content);
+        // Handle system messages - use content blocks if cache_control is present
+        let system_messages: Vec<&Message> = messages.iter()
+            .filter(|msg| msg.role == "system")
+            .collect();
+
+        if !system_messages.is_empty() {
+            if has_cache_control {
+                // Use content block format for cache_control support
+                let system_blocks: Vec<SystemContentBlock> = system_messages.iter()
+                    .map(|msg| SystemContentBlock {
+                        content_type: "text".to_string(),
+                        text: msg.content.clone(),
+                        cache_control: msg.cache_control.as_ref().map(|cc| CacheControlMarker {
+                            cache_type: cc.cache_type.clone(),
+                        }),
+                    })
+                    .collect();
+                request["system"] = serde_json::to_value(system_blocks).unwrap_or(json!([]));
+            } else {
+                // Use simple string format for backward compatibility
+                if let Some(system_msg) = system_messages.first() {
+                    request["system"] = json!(system_msg.content);
+                }
+            }
         }
 
         // Add structured output support using tools if schema is provided
@@ -178,13 +215,21 @@ impl ModelClient for AnthropicClient {
         let api_key = self.get_api_key();
         let body = serde_json::to_string(&self.format_request_body(messages, None, None))?;
 
-        let response = client.post(self.api_endpoint())
+        // Check if any message has cache_control to add the beta header
+        let has_cache_control = messages.iter()
+            .any(|msg| msg.cache_control.is_some());
+
+        let mut request = client.post(self.api_endpoint())
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;
+            .header("Content-Type", "application/json");
+
+        // Add prompt caching beta header if cache_control is present
+        if has_cache_control {
+            request = request.header("anthropic-beta", "prompt-caching-2024-07-31");
+        }
+
+        let response = request.body(body).send().await?;
 
         let status = response.status();
         let text = response.text().await?;
@@ -206,13 +251,21 @@ impl ModelClient for AnthropicClient {
         let api_key = self.get_api_key();
         let body = serde_json::to_string(&self.format_request_body(messages, schema, model_name))?;
 
-        let response = client.post(self.api_endpoint())
+        // Check if any message has cache_control to add the beta header
+        let has_cache_control = messages.iter()
+            .any(|msg| msg.cache_control.is_some());
+
+        let mut request = client.post(self.api_endpoint())
             .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;
+            .header("Content-Type", "application/json");
+
+        // Add prompt caching beta header if cache_control is present
+        if has_cache_control {
+            request = request.header("anthropic-beta", "prompt-caching-2024-07-31");
+        }
+
+        let response = request.body(body).send().await?;
 
         let status = response.status();
         let text = response.text().await?;

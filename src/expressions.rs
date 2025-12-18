@@ -1,4 +1,5 @@
 #![allow(clippy::unused_unit)]
+use crate::cache::{self, CacheStrategy, CacheConfig};
 use crate::utils::*;
 use crate::model_client::{Provider, Message};
 use crate::cost;
@@ -38,6 +39,23 @@ pub struct InferenceKwargs {
     response_schema: Option<String>,
     #[serde(default)]
     response_model_name: Option<String>,
+
+    // === Caching options ===
+    /// Enable cache optimization (default: false)
+    #[serde(default)]
+    cache: Option<bool>,
+    /// Cache strategy: "auto", "system_prompt", "schema", "full_prefix", "none"
+    #[serde(default)]
+    cache_strategy: Option<String>,
+    /// Cache TTL for Anthropic: "5m" (default) or "1h"
+    #[serde(default)]
+    cache_ttl: Option<String>,
+    /// Optional cache key hint for OpenAI routing
+    #[serde(default)]
+    cache_key: Option<String>,
+    /// Minimum tokens to trigger caching (default: 1024)
+    #[serde(default)]
+    cache_min_tokens: Option<usize>,
 }
 
 fn parse_provider(provider_str: &str) -> Option<Provider> {
@@ -279,116 +297,74 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
     // Extract just the message arrays for the API calls
     let message_arrays: Vec<Vec<Message>> = arrays_with_indices.iter().map(|(_, arr)| arr.clone()).collect();
 
-    // Get results based on provider and model
-    let api_results = if kwargs.response_schema.is_some() {
-        // Use structured output with validation
-        // Clone the strings so we can move them into async blocks
+    // Determine provider and model
+    let provider = kwargs.provider
+        .as_ref()
+        .and_then(|s| parse_provider(s))
+        .unwrap_or(Provider::OpenAI);
+
+    let model = kwargs.model
+        .clone()
+        .unwrap_or_else(|| get_default_model(provider).to_string());
+
+    // Check if caching is enabled
+    let cache_enabled = kwargs.cache.unwrap_or(false);
+
+    // Get results based on caching, provider and model
+    let api_results = if cache_enabled {
+        // Build cache config from kwargs
+        let cache_config = CacheConfig {
+            strategy: kwargs.cache_strategy
+                .as_ref()
+                .map(|s| CacheStrategy::from_str(s))
+                .unwrap_or_default(),
+            ttl: kwargs.cache_ttl.clone().unwrap_or_else(|| "5m".to_string()),
+            cache_key: kwargs.cache_key.clone(),
+            min_tokens: kwargs.cache_min_tokens.unwrap_or(1024),
+            report_metrics: true,
+        };
+
+        // Analyze batch to find cache groups
+        let cache_groups = cache::analyze_batch_for_caching(
+            &message_arrays,
+            cache_config.strategy,
+            cache_config.min_tokens,
+        );
+
+        // Process with cache optimization
         let schema_owned = kwargs.response_schema.clone();
         let model_name_owned = kwargs.response_model_name.clone();
 
-        match (&kwargs.provider, &kwargs.model) {
-            (Some(provider_str), Some(model)) => {
-                if let Some(provider) = parse_provider(provider_str) {
-                    let arrays_owned = message_arrays.clone();
-                    let model_owned = model.clone();
-                    let schema = schema_owned.clone();
-                    let model_name = model_name_owned.clone();
-                    run_async(async move {
-                        crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, provider, &model_owned, schema.as_deref(), model_name.as_deref()).await
-                    })
-                } else {
-                    let arrays_owned = message_arrays.clone();
-                    let model_owned = model.clone();
-                    let schema = schema_owned.clone();
-                    let model_name = model_name_owned.clone();
-                    run_async(async move {
-                        crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, Provider::OpenAI, &model_owned, schema.as_deref(), model_name.as_deref()).await
-                    })
-                }
-            },
-            (Some(provider_str), None) => {
-                if let Some(provider) = parse_provider(provider_str) {
-                    let default_model = get_default_model(provider);
-                    let arrays_owned = message_arrays.clone();
-                    let schema = schema_owned.clone();
-                    let model_name = model_name_owned.clone();
-                    run_async(async move {
-                        crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, provider, default_model, schema.as_deref(), model_name.as_deref()).await
-                    })
-                } else {
-                    let default_model = get_default_model(Provider::OpenAI);
-                    let arrays_owned = message_arrays.clone();
-                    let schema = schema_owned.clone();
-                    let model_name = model_name_owned.clone();
-                    run_async(async move {
-                        crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, Provider::OpenAI, default_model, schema.as_deref(), model_name.as_deref()).await
-                    })
-                }
-            },
-            (None, Some(model)) => {
-                let arrays_owned = message_arrays.clone();
-                let model_owned = model.clone();
-                let schema = schema_owned.clone();
-                let model_name = model_name_owned.clone();
-                run_async(async move {
-                    crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, Provider::OpenAI, &model_owned, schema.as_deref(), model_name.as_deref()).await
-                })
-            },
-            (None, None) => {
-                let default_model = get_default_model(Provider::OpenAI);
-                let arrays_owned = message_arrays.clone();
-                let schema = schema_owned.clone();
-                let model_name = model_name_owned.clone();
-                run_async(async move {
-                    crate::utils::fetch_data_message_arrays_with_provider_and_schema(&arrays_owned, Provider::OpenAI, default_model, schema.as_deref(), model_name.as_deref()).await
-                })
-            },
-        }
+        process_with_cache_groups(
+            message_arrays,
+            cache_groups,
+            provider,
+            &model,
+            &cache_config,
+            schema_owned.as_deref(),
+            model_name_owned.as_deref(),
+        )
+    } else if kwargs.response_schema.is_some() {
+        // Use structured output with validation (non-cached)
+        let schema_owned = kwargs.response_schema.clone();
+        let model_name_owned = kwargs.response_model_name.clone();
+        let arrays_owned = message_arrays.clone();
+        let model_owned = model.clone();
+
+        run_async(async move {
+            crate::utils::fetch_data_message_arrays_with_provider_and_schema(
+                &arrays_owned, provider, &model_owned,
+                schema_owned.as_deref(), model_name_owned.as_deref()
+            ).await
+        })
     } else {
-        // Use regular inference without structured output
-        match (&kwargs.provider, &kwargs.model) {
-            (Some(provider_str), Some(model)) => {
-                if let Some(provider) = parse_provider(provider_str) {
-                    let arrays_owned = message_arrays.clone();
-                    let model_owned = model.clone();
-                    run_async(async move {
-                        crate::utils::fetch_data_message_arrays_with_provider(&arrays_owned, provider, &model_owned).await
-                    })
-                } else {
-                    let arrays_owned = message_arrays.clone();
-                    run_async(async move {
-                        crate::utils::fetch_data_message_arrays(&arrays_owned).await
-                    })
-                }
-            },
-            (Some(provider_str), None) => {
-                if let Some(provider) = parse_provider(provider_str) {
-                    let default_model = get_default_model(provider);
-                    let arrays_owned = message_arrays.clone();
-                    run_async(async move {
-                        crate::utils::fetch_data_message_arrays_with_provider(&arrays_owned, provider, default_model).await
-                    })
-                } else {
-                    let arrays_owned = message_arrays.clone();
-                    run_async(async move {
-                        crate::utils::fetch_data_message_arrays(&arrays_owned).await
-                    })
-                }
-            },
-            (None, Some(model)) => {
-                let arrays_owned = message_arrays.clone();
-                let model_owned = model.clone();
-                run_async(async move {
-                    crate::utils::fetch_data_message_arrays_with_provider(&arrays_owned, Provider::OpenAI, &model_owned).await
-                })
-            },
-            (None, None) => {
-                let arrays_owned = message_arrays.clone();
-                run_async(async move {
-                    crate::utils::fetch_data_message_arrays(&arrays_owned).await
-                })
-            },
-        }
+        // Use regular inference without structured output (non-cached)
+        let arrays_owned = message_arrays.clone();
+        let model_owned = model.clone();
+
+        run_async(async move {
+            crate::utils::fetch_data_message_arrays_with_provider(&arrays_owned, provider, &model_owned).await
+        })
     };
 
     // Map results back to original positions
@@ -400,6 +376,80 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
     let out = StringChunked::from_iter_options(ca.name().clone(), results.into_iter());
 
     Ok(out.into_series())
+}
+
+/// Process message arrays with cache group optimization
+fn process_with_cache_groups(
+    message_arrays: Vec<Vec<Message>>,
+    cache_groups: Vec<cache::CacheGroup>,
+    provider: Provider,
+    model: &str,
+    config: &CacheConfig,
+    response_schema: Option<&str>,
+    response_model_name: Option<&str>,
+) -> Vec<Option<String>> {
+    let total_rows = message_arrays.len();
+    let mut all_results: Vec<(usize, Option<String>)> = Vec::with_capacity(total_rows);
+
+    // Process each cache group
+    // Groups are processed sequentially to ensure cache warming
+    // Within each group, first request warms cache, rest are parallel
+    for group in cache_groups {
+        // Prepare messages with cache control markers
+        let prepared_messages: Vec<Vec<Message>> = group.row_indices
+            .iter()
+            .map(|&row_idx| {
+                cache::prepare_messages_for_caching(
+                    message_arrays[row_idx].clone(),
+                    provider,
+                    config,
+                    group.cache_breakpoint_idx,
+                )
+            })
+            .collect();
+
+        // Execute with cache warming pattern
+        let group_results = if prepared_messages.len() > 1 {
+            let msgs = prepared_messages.clone();
+            let m = model.to_string();
+            let schema = response_schema.map(|s| s.to_string());
+            let model_name = response_model_name.map(|s| s.to_string());
+
+            run_async(async move {
+                crate::utils::fetch_with_cache_warming(
+                    &msgs, provider, &m,
+                    schema.as_deref(), model_name.as_deref()
+                ).await
+            })
+        } else {
+            // Single row in group - no cache warming benefit
+            let msgs = prepared_messages.clone();
+            let m = model.to_string();
+            let schema = response_schema.map(|s| s.to_string());
+            let model_name = response_model_name.map(|s| s.to_string());
+
+            run_async(async move {
+                if schema.is_some() {
+                    crate::utils::fetch_data_message_arrays_with_provider_and_schema(
+                        &msgs, provider, &m,
+                        schema.as_deref(), model_name.as_deref()
+                    ).await
+                } else {
+                    crate::utils::fetch_data_message_arrays_with_provider(&msgs, provider, &m).await
+                }
+            })
+        };
+
+        // Map results back to original indices
+        for (within_group_idx, result) in group_results.into_iter().enumerate() {
+            let original_idx = group.row_indices[within_group_idx];
+            all_results.push((original_idx, result));
+        }
+    }
+
+    // Sort by original index and extract results
+    all_results.sort_by_key(|(idx, _)| *idx);
+    all_results.into_iter().map(|(_, r)| r).collect()
 }
 
 // Function to combine multiple message expressions into a single JSON array

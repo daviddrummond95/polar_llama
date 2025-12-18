@@ -13,10 +13,16 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use futures;
 
+use crate::cache::CacheControl;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: String,
+    /// Cache control marker for Anthropic/Bedrock
+    /// Only serialized when present
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -332,6 +338,7 @@ pub async fn fetch_data_generic<T: ModelClient + Sync + ?Sized>(
         let formatted_message = Message {
             role: "user".to_string(),
             content: content.clone(),
+            cache_control: None,
         };
         let messages = vec![formatted_message];
         let reqwest_client = &reqwest_client;
@@ -366,6 +373,7 @@ pub async fn fetch_data_generic_with_schema<T: ModelClient + Sync + ?Sized>(
         let formatted_message = Message {
             role: "user".to_string(),
             content: content.clone(),
+            cache_control: None,
         };
         let messages = vec![formatted_message];
         let reqwest_client = &reqwest_client;

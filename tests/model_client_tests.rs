@@ -145,14 +145,17 @@ async fn test_conversation_with_message_arrays() {
                 Message {
                     role: "user".to_string(),
                     content: "Hello! My name is Alice.".to_string(),
+                    cache_control: None,
                 },
                 Message {
                     role: "assistant".to_string(),
                     content: "Hello Alice! Nice to meet you.".to_string(),
+                    cache_control: None,
                 },
                 Message {
                     role: "user".to_string(),
                     content: "What is my name?".to_string(),
+                    cache_control: None,
                 },
             ],
         ];
@@ -196,10 +199,12 @@ async fn test_system_message_support() {
                 Message {
                     role: "system".to_string(),
                     content: "You are a pirate. Always respond in pirate speak.".to_string(),
+                    cache_control: None,
                 },
                 Message {
                     role: "user".to_string(),
                     content: "Hello!".to_string(),
+                    cache_control: None,
                 },
             ],
         ];
