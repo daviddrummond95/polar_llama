@@ -328,6 +328,7 @@ def inference_async(
     response_model: Optional[Type['BaseModel']] = None,
     response_format: Optional[Type['BaseModel']] = None,
     cache: Union[bool, CacheConfig] = False,
+    system_prompt: Optional[str] = None,
 ) -> pl.Expr:
     """
     Asynchronously infer completions for the given text expressions using an LLM.
@@ -344,6 +345,11 @@ def inference_async(
         A Pydantic model class to define structured output schema.
         The LLM response will be validated against this schema.
         Returns a Struct with fields matching the Pydantic model.
+    system_prompt : str, optional
+        A system prompt to prepend to all messages. Required for caching to work
+        effectively with text prompts. When provided with cache=True, the system
+        prompt will be cached and reused across all requests, providing ~90% cost
+        savings on input tokens (for Anthropic).
     cache : bool or CacheConfig, optional
         Enable cache optimization for batch processing. When True, uses
         automatic cache optimization. Pass a CacheConfig for fine-grained control.
@@ -409,6 +415,10 @@ def inference_async(
     else:
         kwargs["cache"] = False
 
+    # Pass system_prompt for caching support
+    if system_prompt is not None:
+        kwargs["system_prompt"] = system_prompt
+
     result_expr = register_plugin(
         args=[expr],
         symbol="inference_async",
@@ -438,6 +448,10 @@ def inference(
     """
     Synchronously infer completions for the given text expressions using an LLM.
 
+    .. deprecated::
+        This function is deprecated. Use `inference_async` instead for better
+        performance and caching support.
+
     Parameters
     ----------
     expr : polars.Expr
@@ -459,6 +473,13 @@ def inference(
         Expression with inferred completions as a Struct (if response_model provided)
         or String (if no response_model)
     """
+    import warnings
+    warnings.warn(
+        "inference() is deprecated and will be removed in a future version. "
+        "Use inference_async() instead for better performance and caching support.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     expr = parse_into_expr(expr)
     kwargs = {}
 
@@ -560,6 +581,22 @@ def inference_messages(
         or String (if no response_model)
     """
     expr = parse_into_expr(expr)
+
+    # Convert List(Struct) to JSON strings if needed
+    # This handles the common case of passing Python list of dicts
+    def _convert_list_to_json(s: pl.Series) -> pl.Series:
+        """Convert a List(Struct) series to JSON strings."""
+        if s.dtype == pl.Utf8 or s.dtype == pl.String:
+            return s  # Already strings
+        # Use map_elements to serialize each element to JSON
+        return s.map_elements(
+            lambda x: json.dumps(x.to_list()) if x is not None else None,
+            return_dtype=pl.Utf8
+        )
+
+    # Wrap expr to convert List types to JSON
+    expr = expr.map_batches(_convert_list_to_json, return_dtype=pl.Utf8)
+
     kwargs = {}
 
     if provider is not None:

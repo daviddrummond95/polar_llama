@@ -21,7 +21,7 @@ pub struct Message {
     pub content: String,
     /// Cache control marker for Anthropic/Bedrock
     /// Only serialized when present
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<CacheControl>,
 }
 

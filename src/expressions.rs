@@ -56,6 +56,9 @@ pub struct InferenceKwargs {
     /// Minimum tokens to trigger caching (default: 1024)
     #[serde(default)]
     cache_min_tokens: Option<usize>,
+    /// System prompt to prepend to all messages (enables caching for inference_async)
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
 fn parse_provider(provider_str: &str) -> Option<Provider> {
@@ -110,6 +113,89 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
 
     let ca: &StringChunked = input_series.str()?;
 
+    // Determine provider and model
+    let provider = kwargs.provider
+        .as_ref()
+        .and_then(|s| parse_provider(s))
+        .unwrap_or(Provider::OpenAI);
+
+    let model = kwargs.model
+        .clone()
+        .unwrap_or_else(|| get_default_model(provider).to_string());
+
+    // Check if caching is enabled with a system prompt
+    let cache_enabled = kwargs.cache.unwrap_or(false);
+
+    if cache_enabled && kwargs.system_prompt.is_some() {
+        // Use caching path: convert text prompts to message arrays with shared system prompt
+        let system_prompt = kwargs.system_prompt.as_ref().unwrap();
+
+        // Build message arrays with shared system prompt
+        let mut arrays_with_indices: Vec<(usize, Vec<Message>)> = Vec::new();
+        for (idx, opt_value) in ca.into_iter().enumerate() {
+            if let Some(user_content) = opt_value {
+                let messages = vec![
+                    Message {
+                        role: "system".to_string(),
+                        content: system_prompt.clone(),
+                        cache_control: None,
+                    },
+                    Message {
+                        role: "user".to_string(),
+                        content: user_content.to_string(),
+                        cache_control: None,
+                    },
+                ];
+                arrays_with_indices.push((idx, messages));
+            }
+        }
+
+        let message_arrays: Vec<Vec<Message>> = arrays_with_indices.iter().map(|(_, arr)| arr.clone()).collect();
+
+        // Build cache config
+        let cache_config = CacheConfig {
+            strategy: kwargs.cache_strategy
+                .as_ref()
+                .map(|s| CacheStrategy::from_str(s))
+                .unwrap_or_default(),
+            ttl: kwargs.cache_ttl.clone().unwrap_or_else(|| "5m".to_string()),
+            cache_key: kwargs.cache_key.clone(),
+            min_tokens: kwargs.cache_min_tokens.unwrap_or(1024),
+            report_metrics: true,
+        };
+
+        // Analyze batch for cache groups
+        let cache_groups = cache::analyze_batch_for_caching(
+            &message_arrays,
+            cache_config.strategy,
+            cache_config.min_tokens,
+        );
+
+        // Process with cache optimization
+        let schema_owned = kwargs.response_schema.clone();
+        let model_name_owned = kwargs.response_model_name.clone();
+
+        let api_results = process_with_cache_groups(
+            message_arrays,
+            cache_groups,
+            provider,
+            &model,
+            &cache_config,
+            schema_owned.as_deref(),
+            model_name_owned.as_deref(),
+        );
+
+        // Map results back to original positions
+        let mut results: Vec<Option<String>> = vec![None; input_series.len()];
+        for ((idx, _), result) in arrays_with_indices.iter().zip(api_results.iter()) {
+            results[*idx] = result.clone();
+        }
+
+        let out = StringChunked::from_iter_options(input_series.name().clone(), results.into_iter());
+        return Ok(out.into_series());
+    }
+
+    // Non-caching path: original implementation
     // Collect all messages, keeping track of their original indices
     let mut messages_with_indices: Vec<(usize, String)> = Vec::new();
     for (idx, opt_value) in ca.into_iter().enumerate() {
@@ -282,15 +368,34 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
         ).into_series());
     }
 
-    let ca: &StringChunked = input_series.str()?;
-
     // Collect message arrays, keeping track of their original indices
     let mut arrays_with_indices: Vec<(usize, Vec<Message>)> = Vec::new();
-    for (idx, opt) in ca.into_iter().enumerate() {
-        if let Some(s) = opt {
-            // Parse the JSON string into a vector of Messages
-            let messages = crate::utils::parse_message_json(s).unwrap_or_default();
-            arrays_with_indices.push((idx, messages));
+
+    // Handle both String (JSON) and List(Struct) inputs
+    match input_series.dtype() {
+        polars::datatypes::DataType::String => {
+            // Input is JSON strings - parse them
+            let ca: &StringChunked = input_series.str()?;
+            for (idx, opt) in ca.into_iter().enumerate() {
+                if let Some(s) = opt {
+                    let messages = crate::utils::parse_message_json(s).unwrap_or_default();
+                    arrays_with_indices.push((idx, messages));
+                }
+            }
+        }
+        polars::datatypes::DataType::List(_) => {
+            // List(Struct) input should be converted to JSON strings in Python
+            // before calling this function. Return an error if we get here.
+            return Err(polars::prelude::PolarsError::InvalidOperation(
+                "List input detected. Please convert to JSON strings using \
+                 .map_elements(lambda x: json.dumps(x.to_list()), return_dtype=pl.Utf8) \
+                 or use the inference_messages wrapper which handles this automatically.".into()
+            ));
+        }
+        other => {
+            return Err(polars::prelude::PolarsError::InvalidOperation(
+                format!("inference_messages expects String or List(Struct) input, got {:?}", other).into()
+            ));
         }
     }
 
@@ -368,12 +473,12 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
     };
 
     // Map results back to original positions
-    let mut results: Vec<Option<String>> = vec![None; ca.len()];
+    let mut results: Vec<Option<String>> = vec![None; input_series.len()];
     for ((idx, _), result) in arrays_with_indices.iter().zip(api_results.iter()) {
         results[*idx] = result.clone();
     }
 
-    let out = StringChunked::from_iter_options(ca.name().clone(), results.into_iter());
+    let out = StringChunked::from_iter_options(input_series.name().clone(), results.into_iter());
 
     Ok(out.into_series())
 }
