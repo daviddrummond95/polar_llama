@@ -1,3 +1,4 @@
+pub mod cache;
 mod expressions;
 pub mod utils;
 pub mod model_client;

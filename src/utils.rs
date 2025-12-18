@@ -318,3 +318,124 @@ pub async fn fetch_embeddings_with_provider(
     let client = create_embedding_client(provider, model);
     model_client::fetch_embeddings_generic(&*client, texts).await
 }
+
+// ============================================================================
+// Cache-Aware Fetch Functions
+// ============================================================================
+
+/// Fetch with cache warming pattern:
+/// 1. Execute first request and wait for completion (warms cache)
+/// 2. Execute remaining requests in parallel (should hit cache)
+///
+/// This ordering is crucial for Anthropic/Bedrock where cache TTL is short
+pub async fn fetch_with_cache_warming(
+    message_arrays: &[Vec<Message>],
+    provider: Provider,
+    model: &str,
+    response_schema: Option<&str>,
+    response_model_name: Option<&str>,
+) -> Vec<Option<String>> {
+    if message_arrays.is_empty() {
+        return vec![];
+    }
+
+    let client = create_client(provider, model);
+    let reqwest_client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    // Step 1: Process first request to warm the cache
+    let first_result = if let Some(schema) = response_schema {
+        client.send_request_structured(
+            &reqwest_client,
+            &message_arrays[0],
+            Some(schema),
+            response_model_name,
+        ).await
+    } else {
+        client.send_request(&reqwest_client, &message_arrays[0]).await
+    };
+
+    let first_result = match first_result {
+        Ok(response) => {
+            // Validate if schema is provided
+            if let Some(schema_str) = response_schema {
+                match model_client::validate_json_schema(&response, schema_str) {
+                    Ok(_) => Some(response),
+                    Err(validation_error) => {
+                        Some(model_client::create_error_response(
+                            "validation_failed",
+                            &validation_error,
+                            Some(&response),
+                        ))
+                    }
+                }
+            } else {
+                Some(response)
+            }
+        }
+        Err(e) => {
+            eprintln!("Error fetching from {} (cache warming): {}", provider.as_str(), e);
+            Some(model_client::create_error_response("api_error", &e.to_string(), None))
+        }
+    };
+
+    let mut results = vec![first_result];
+
+    // Step 2: Process remaining requests in parallel (should hit cache)
+    if message_arrays.len() > 1 {
+        let remaining_futures: Vec<_> = message_arrays[1..]
+            .iter()
+            .map(|msgs| {
+                let client = create_client(provider, model);
+                let reqwest_client = reqwest_client.clone();
+                let messages = msgs.clone();
+                let schema_owned = response_schema.map(|s| s.to_string());
+                let model_name_owned = response_model_name.map(|s| s.to_string());
+
+                async move {
+                    let result = if let Some(schema) = schema_owned.as_deref() {
+                        client.send_request_structured(
+                            &reqwest_client,
+                            &messages,
+                            Some(schema),
+                            model_name_owned.as_deref(),
+                        ).await
+                    } else {
+                        client.send_request(&reqwest_client, &messages).await
+                    };
+
+                    match result {
+                        Ok(response) => {
+                            // Validate if schema is provided
+                            if let Some(schema_str) = schema_owned.as_deref() {
+                                match model_client::validate_json_schema(&response, schema_str) {
+                                    Ok(_) => Some(response),
+                                    Err(validation_error) => {
+                                        Some(model_client::create_error_response(
+                                            "validation_failed",
+                                            &validation_error,
+                                            Some(&response),
+                                        ))
+                                    }
+                                }
+                            } else {
+                                Some(response)
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Error fetching from {}: {}", provider.as_str(), e);
+                            Some(model_client::create_error_response("api_error", &e.to_string(), None))
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        let remaining_results = futures::future::join_all(remaining_futures).await;
+        results.extend(remaining_results);
+    }
+
+    results
+}

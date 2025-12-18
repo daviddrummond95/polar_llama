@@ -7,6 +7,7 @@ import json
 import polars as pl
 
 from polar_llama.utils import parse_into_expr, register_plugin, parse_version
+from polar_llama.types import CacheStrategy, CacheConfig, CacheMetrics
 
 if TYPE_CHECKING:
     from polars.type_aliases import IntoExpr
@@ -326,6 +327,8 @@ def inference_async(
     model: Optional[str] = None,
     response_model: Optional[Type['BaseModel']] = None,
     response_format: Optional[Type['BaseModel']] = None,
+    cache: Union[bool, CacheConfig] = False,
+    system_prompt: Optional[str] = None,
 ) -> pl.Expr:
     """
     Asynchronously infer completions for the given text expressions using an LLM.
@@ -342,6 +345,34 @@ def inference_async(
         A Pydantic model class to define structured output schema.
         The LLM response will be validated against this schema.
         Returns a Struct with fields matching the Pydantic model.
+    system_prompt : str, optional
+        A system prompt to prepend to all messages. Required for caching to work
+        effectively with text prompts. When provided with cache=True, the system
+        prompt will be cached and reused across all requests, providing ~90% cost
+        savings on input tokens (for Anthropic).
+    cache : bool or CacheConfig, optional
+        Enable cache optimization for batch processing. When True, uses
+        automatic cache optimization. Pass a CacheConfig for fine-grained control.
+        Default: False (caching disabled).
+
+        When caching is enabled, Polar Llama will:
+        1. Detect shared prefixes (system prompts, schemas) across rows
+        2. Group rows by shared content for efficient API calls
+        3. Add provider-specific cache control markers
+        4. Order requests to maximize cache hits
+
+        Example:
+            >>> # Simple: enable automatic caching
+            >>> df.with_columns(
+            ...     response=inference_async(pl.col("messages"), cache=True)
+            ... )
+            >>>
+            >>> # Advanced: configure caching behavior
+            >>> from polar_llama import CacheConfig, CacheStrategy
+            >>> config = CacheConfig(strategy=CacheStrategy.SYSTEM_PROMPT, ttl="1h")
+            >>> df.with_columns(
+            ...     response=inference_async(pl.col("messages"), cache=config)
+            ... )
 
     Returns
     -------
@@ -375,6 +406,19 @@ def inference_async(
         # Create the target struct dtype for later conversion
         struct_dtype = _json_schema_to_polars_dtype(schema)
 
+    # Handle cache configuration
+    if cache is True:
+        kwargs["cache"] = True
+        # Use defaults: strategy=AUTO, min_tokens=1024, ttl="5m"
+    elif isinstance(cache, CacheConfig):
+        kwargs.update(cache.to_kwargs())
+    else:
+        kwargs["cache"] = False
+
+    # Pass system_prompt for caching support
+    if system_prompt is not None:
+        kwargs["system_prompt"] = system_prompt
+
     result_expr = register_plugin(
         args=[expr],
         symbol="inference_async",
@@ -404,6 +448,10 @@ def inference(
     """
     Synchronously infer completions for the given text expressions using an LLM.
 
+    .. deprecated::
+        This function is deprecated. Use `inference_async` instead for better
+        performance and caching support.
+
     Parameters
     ----------
     expr : polars.Expr
@@ -425,6 +473,13 @@ def inference(
         Expression with inferred completions as a Struct (if response_model provided)
         or String (if no response_model)
     """
+    import warnings
+    warnings.warn(
+        "inference() is deprecated and will be removed in a future version. "
+        "Use inference_async() instead for better performance and caching support.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     expr = parse_into_expr(expr)
     kwargs = {}
 
@@ -476,6 +531,7 @@ def inference_messages(
     model: Optional[str] = None,
     response_model: Optional[Type['BaseModel']] = None,
     response_format: Optional[Type['BaseModel']] = None,
+    cache: Union[bool, CacheConfig] = False,
 ) -> pl.Expr:
     """
     Process message arrays (conversations) for inference using LLMs.
@@ -497,6 +553,26 @@ def inference_messages(
         Returns a Struct with fields matching the Pydantic model.
     response_format : Type[BaseModel], optional
         Alias for response_model.
+    cache : bool or CacheConfig, optional
+        Enable cache optimization for batch processing. When True, uses
+        automatic cache optimization. Pass a CacheConfig for fine-grained control.
+        Default: False (caching disabled).
+
+        This is particularly effective for message arrays where many rows share
+        the same system prompt. The first request warms the cache, and subsequent
+        requests with the same system prompt get a 90% discount on input tokens
+        (for Anthropic) or 50% (for OpenAI).
+
+        Example:
+            >>> # Enable caching for Anthropic Claude
+            >>> df.with_columns(
+            ...     response=inference_messages(
+            ...         pl.col("messages"),
+            ...         provider=Provider.ANTHROPIC,
+            ...         model="claude-sonnet-4-20250514",
+            ...         cache=True
+            ...     )
+            ... )
 
     Returns
     -------
@@ -505,6 +581,22 @@ def inference_messages(
         or String (if no response_model)
     """
     expr = parse_into_expr(expr)
+
+    # Convert List(Struct) to JSON strings if needed
+    # This handles the common case of passing Python list of dicts
+    def _convert_list_to_json(s: pl.Series) -> pl.Series:
+        """Convert a List(Struct) series to JSON strings."""
+        if s.dtype == pl.Utf8 or s.dtype == pl.String:
+            return s  # Already strings
+        # Use map_elements to serialize each element to JSON
+        return s.map_elements(
+            lambda x: json.dumps(x.to_list()) if x is not None else None,
+            return_dtype=pl.Utf8
+        )
+
+    # Wrap expr to convert List types to JSON
+    expr = expr.map_batches(_convert_list_to_json, return_dtype=pl.Utf8)
+
     kwargs = {}
 
     if provider is not None:
@@ -534,6 +626,15 @@ def inference_messages(
         kwargs["response_model_name"] = response_model.__name__
         # Create the target struct dtype for later conversion
         struct_dtype = _json_schema_to_polars_dtype(schema)
+
+    # Handle cache configuration
+    if cache is True:
+        kwargs["cache"] = True
+        # Use defaults: strategy=AUTO, min_tokens=1024, ttl="5m"
+    elif isinstance(cache, CacheConfig):
+        kwargs.update(cache.to_kwargs())
+    else:
+        kwargs["cache"] = False
 
     # Don't pass empty kwargs dictionary
     if not kwargs:
@@ -1129,10 +1230,11 @@ class LlamaNamespace:
         model: Optional[str] = None,
         response_model: Optional[Type['BaseModel']] = None,
         response_format: Optional[Type['BaseModel']] = None,
+        cache: Union[bool, CacheConfig] = False,
     ) -> pl.Expr:
         """
         Asynchronously infer completions for the expression using an LLM.
-        
+
         Parameters
         ----------
         provider : str or Provider, optional
@@ -1143,7 +1245,9 @@ class LlamaNamespace:
             Pydantic model for structured output
         response_format : Type[BaseModel], optional
             Alias for response_model
-            
+        cache : bool or CacheConfig, optional
+            Enable cache optimization for batch processing
+
         Returns
         -------
         polars.Expr
@@ -1153,7 +1257,8 @@ class LlamaNamespace:
             self._expr,
             provider=provider,
             model=model,
-            response_model=response_model or response_format
+            response_model=response_model or response_format,
+            cache=cache,
         )
     
     def tag_taxonomy(

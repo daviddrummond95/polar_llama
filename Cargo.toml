@@ -38,6 +38,8 @@ jsonschema = "0.28"
 instant-distance = { version = "0.6", features = ["with-serde"] }
 # Token counting for cost calculation (tiktoken compatible)
 tiktoken-rs = "0.6"
+# SHA-256 hashing for cache prefix detection
+sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 jemallocator = { version = "0.5", features = ["disable_initial_exec_tls"] }
