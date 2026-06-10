@@ -61,10 +61,10 @@ def get_configured_providers():
     """Get list of providers that have API keys configured."""
     providers = [
         ('openai', Provider.OPENAI, 'gpt-4o-mini'),
-        ('anthropic', Provider.ANTHROPIC, 'claude-3-haiku-20240307'),
-        ('gemini', Provider.GEMINI, 'gemini-1.5-flash'),
+        ('anthropic', Provider.ANTHROPIC, 'claude-haiku-4-5'),
+        ('gemini', Provider.GEMINI, 'gemini-2.5-flash'),
         ('groq', Provider.GROQ, 'llama-3.1-8b-instant'),
-        ('bedrock', Provider.BEDROCK, 'anthropic.claude-3-haiku-20240307-v1:0'),
+        ('bedrock', Provider.BEDROCK, 'us.anthropic.claude-haiku-4-5-20251001-v1:0'),
     ]
 
     configured = [

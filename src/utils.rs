@@ -1,9 +1,14 @@
 use polars::prelude::*;
-use serde_json::json;
+use std::sync::LazyLock;
+use tokio::runtime::Runtime;
 use crate::model_client::{self, Provider, create_client, create_embedding_client, Message, ModelClientError};
 
 // Remove duplicate error type - use ModelClientError from model_client instead
 pub type FetchError = ModelClientError;
+
+/// Global Tokio runtime shared by all blocking entry points.
+pub(crate) static RT: LazyLock<Runtime> =
+    LazyLock::new(|| Runtime::new().expect("Failed to create Tokio runtime"));
 
 // This function is useful for writing functions which
 // accept pairs of List columns. Delete if unneded.
@@ -28,9 +33,7 @@ where
 }
 
 pub async fn fetch_data(messages: &[String]) -> Vec<Option<String>> {
-    // Default to OpenAI with gpt-4-turbo
-    let client = create_client(Provider::OpenAI, "gpt-4-turbo");
-    model_client::fetch_data_generic(&*client, messages).await
+    fetch_data_with_provider(messages, Provider::OpenAI, crate::model_client::openai::DEFAULT_OPENAI_MODEL).await
 }
 
 pub async fn fetch_data_with_provider(messages: &[String], provider: Provider, model: &str) -> Vec<Option<String>> {
@@ -40,15 +43,17 @@ pub async fn fetch_data_with_provider(messages: &[String], provider: Provider, m
 
 // New function to support message arrays with OpenAI default
 pub async fn fetch_data_message_arrays(message_arrays: &[Vec<Message>]) -> Vec<Option<String>> {
-    // Default to OpenAI with gpt-4-turbo
-    let client = create_client(Provider::OpenAI, "gpt-4-turbo");
-    model_client::fetch_data_generic_enhanced(&*client, message_arrays).await
+    fetch_data_message_arrays_with_provider(
+        message_arrays,
+        Provider::OpenAI,
+        crate::model_client::openai::DEFAULT_OPENAI_MODEL,
+    ).await
 }
 
 // New function to support message arrays with specific provider
 pub async fn fetch_data_message_arrays_with_provider(
-    message_arrays: &[Vec<Message>], 
-    provider: Provider, 
+    message_arrays: &[Vec<Message>],
+    provider: Provider,
     model: &str
 ) -> Vec<Option<String>> {
     let client = create_client(provider, model);
@@ -62,7 +67,7 @@ pub fn parse_message_json(json_str: &str) -> Result<Vec<Message>, serde_json::Er
     if let Ok(message) = single_message {
         return Ok(vec![message]);
     }
-    
+
     // If that fails, try parsing as an array of messages
     serde_json::from_str(json_str)
 }
@@ -73,207 +78,18 @@ pub fn fetch_api_response_sync(msg: &str, model: &str) -> Result<String, FetchEr
     fetch_api_response_sync_with_provider(msg, model, Provider::OpenAI)
 }
 
-// New sync function with provider support
+// Sync entry point: blocks on the shared async client, so the request logic
+// (auth, formatting, parsing) lives in exactly one place per provider.
 pub fn fetch_api_response_sync_with_provider(msg: &str, model: &str, provider: Provider) -> Result<String, FetchError> {
-    let agent = ureq::agent();
-    let message_obj = json!({"role": "user", "content": msg});
+    let client = create_client(provider, model);
+    let messages = vec![Message {
+        role: "user".to_string(),
+        content: msg.to_string(),
+    }];
 
-    match provider {
-        Provider::OpenAI => {
-            let body = json!({
-                "model": model,
-                "messages": [message_obj],
-                "temperature": 0.7,
-                "max_tokens": 1024
-            }).to_string();
-
-            let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-            let auth = format!("Bearer {api_key}");
-
-            let response = agent.post("https://api.openai.com/v1/chat/completions")
-                .set("Authorization", auth.as_str())
-                .set("Content-Type", "application/json")
-                .send_string(&body);
-
-            match response {
-                Ok(resp) => {
-                    let response_text = resp.into_string()
-                        .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
-                    parse_openai_response(&response_text)
-                },
-                Err(ureq::Error::Status(code, resp)) => {
-                    let error_text = resp.into_string()
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    Err(ModelClientError::Http(code, error_text))
-                },
-                Err(e) => {
-                    Err(ModelClientError::Http(0, format!("HTTP Error: {e}")))
-                }
-            }
-        },
-        Provider::Anthropic => {
-            let body = json!({
-                "model": model,
-                "messages": [message_obj],
-                "max_tokens": 1024
-            }).to_string();
-
-            let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-
-            let response = agent.post("https://api.anthropic.com/v1/messages")
-                .set("x-api-key", api_key.as_str())
-                .set("anthropic-version", "2023-06-01")
-                .set("Content-Type", "application/json")
-                .send_string(&body);
-
-            match response {
-                Ok(resp) => {
-                    let response_text = resp.into_string()
-                        .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
-                    parse_anthropic_response(&response_text)
-                },
-                Err(ureq::Error::Status(code, resp)) => {
-                    let error_text = resp.into_string()
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    Err(ModelClientError::Http(code, error_text))
-                },
-                Err(e) => {
-                    Err(ModelClientError::Http(0, format!("HTTP Error: {e}")))
-                }
-            }
-        },
-        Provider::Gemini => {
-            let body = json!({
-                "contents": [{
-                    "role": "user",
-                    "parts": [{"text": msg}]
-                }],
-                "generationConfig": {
-                    "temperature": 0.7,
-                    "maxOutputTokens": 1024
-                }
-            }).to_string();
-
-            let api_key = std::env::var("GEMINI_API_KEY").unwrap_or_default();
-            let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{model}/generateContent?key={api_key}");
-
-            let response = agent.post(&url)
-                .set("Content-Type", "application/json")
-                .send_string(&body);
-
-            match response {
-                Ok(resp) => {
-                    let response_text = resp.into_string()
-                        .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
-                    parse_gemini_response(&response_text)
-                },
-                Err(ureq::Error::Status(code, resp)) => {
-                    let error_text = resp.into_string()
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    Err(ModelClientError::Http(code, error_text))
-                },
-                Err(e) => {
-                    Err(ModelClientError::Http(0, format!("HTTP Error: {e}")))
-                }
-            }
-        },
-        Provider::Groq => {
-            let body = json!({
-                "model": model,
-                "messages": [message_obj],
-                "temperature": 0.7,
-                "max_tokens": 1024
-            }).to_string();
-
-            let api_key = std::env::var("GROQ_API_KEY").unwrap_or_default();
-            let auth = format!("Bearer {api_key}");
-
-            let response = agent.post("https://api.groq.com/openai/v1/chat/completions")
-                .set("Authorization", auth.as_str())
-                .set("Content-Type", "application/json")
-                .send_string(&body);
-
-            match response {
-                Ok(resp) => {
-                    let response_text = resp.into_string()
-                        .map_err(|e| ModelClientError::ParseError(format!("Failed to read response body: {e}")))?;
-                    parse_openai_response(&response_text) // Groq uses OpenAI-compatible format
-                },
-                Err(ureq::Error::Status(code, resp)) => {
-                    let error_text = resp.into_string()
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    Err(ModelClientError::Http(code, error_text))
-                },
-                Err(e) => {
-                    Err(ModelClientError::Http(0, format!("HTTP Error: {e}")))
-                }
-            }
-        },
-        Provider::Bedrock => {
-            // Bedrock requires AWS SDK and cannot be used synchronously via HTTP
-            Err(ModelClientError::ParseError(
-                "Bedrock provider is not supported in synchronous mode. Please use inference_async instead.".to_string()
-            ))
-        }
-    }
-}
-
-// Simplified OpenAI response parsing using model_client error types
-fn parse_openai_response(response_text: &str) -> Result<String, ModelClientError> {
-    // Use a simple JSON parsing approach since we only need the content
-    let json: serde_json::Value = serde_json::from_str(response_text)?;
-
-    if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
-        if let Some(first_choice) = choices.first() {
-            if let Some(message) = first_choice.get("message") {
-                if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
-                    return Ok(content.to_string());
-                }
-            }
-        }
-    }
-
-    Err(ModelClientError::ParseError("No response content found".to_string()))
-}
-
-// Parse Anthropic API response
-fn parse_anthropic_response(response_text: &str) -> Result<String, ModelClientError> {
-    let json: serde_json::Value = serde_json::from_str(response_text)?;
-
-    if let Some(content_array) = json.get("content").and_then(|c| c.as_array()) {
-        for content_item in content_array {
-            if let Some(content_type) = content_item.get("type").and_then(|t| t.as_str()) {
-                if content_type == "text" {
-                    if let Some(text) = content_item.get("text").and_then(|t| t.as_str()) {
-                        return Ok(text.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    Err(ModelClientError::ParseError("No text content found in Anthropic response".to_string()))
-}
-
-// Parse Gemini API response
-fn parse_gemini_response(response_text: &str) -> Result<String, ModelClientError> {
-    let json: serde_json::Value = serde_json::from_str(response_text)?;
-
-    if let Some(candidates) = json.get("candidates").and_then(|c| c.as_array()) {
-        if let Some(first_candidate) = candidates.first() {
-            if let Some(content) = first_candidate.get("content") {
-                if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
-                    if let Some(first_part) = parts.first() {
-                        if let Some(text) = first_part.get("text").and_then(|t| t.as_str()) {
-                            return Ok(text.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Err(ModelClientError::ParseError("No response content found in Gemini response".to_string()))
+    RT.block_on(async move {
+        client.send_request(model_client::http_client(), &messages).await
+    })
 }
 
 // New functions supporting structured outputs with validation

@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-10
+
+### Added
+- **DSPy-style prompt optimization engine** (`polar_llama.optimize`):
+  - `Signature` — declarative task specs (`"question -> answer"` shorthand or explicit `InputField`/`OutputField` with types and descriptions)
+  - `Predict` — executable LLM module that runs one parallel, batched inference per DataFrame and returns `pred_<field>` columns
+  - `evaluate` — metric-based scoring of a module against a labeled DataFrame
+  - `BootstrapFewShot` — mines few-shot demonstrations from training rows the module already answers correctly (akin to `dspy.BootstrapFewShot`)
+  - `InstructionOptimizer` — COPRO-style instruction search: an LLM proposes instruction rewrites, every candidate is evaluated on the trainset, best one wins
+  - Fully testable offline via an injectable `inference_fn` backend
+- `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` environment overrides for proxies and gateways
+- `POLAR_LLAMA_MAX_CONCURRENCY` environment variable to bound concurrent in-flight requests per batch (default 64; previously unbounded)
+- Gemini: native `system_instruction` support and native JSON-schema structured outputs (`response_json_schema`)
+- Pricing data for current models (GPT-5/4.1/o-series, Claude 4.x/Fable 5, Gemini 2.5, Bedrock Claude 4.5) and o200k tokenizer detection for GPT-4.1/GPT-5/o3/o4
+
+### Changed
+- **Updated default models** (previous defaults were retired/decommissioned):
+  - OpenAI: `gpt-4-turbo` → `gpt-4o-mini`
+  - Anthropic: `claude-3-opus-20240229` (retired) → `claude-opus-4-8`
+  - Gemini: `gemini-1.5-pro` → `gemini-2.5-flash`
+  - Groq: `llama3-70b-8192` (decommissioned) → `llama-3.3-70b-versatile`
+  - Bedrock: `anthropic.claude-3-haiku-20240307-v1:0` → `us.anthropic.claude-haiku-4-5-20251001-v1:0`
+- OpenAI/Groq requests no longer hardcode `temperature`/`max_tokens` (newer models such as the o-series and GPT-5 reject those parameters)
+- Bedrock region now respects `AWS_REGION`/`AWS_DEFAULT_REGION` before falling back to `us-east-1`
+- Removed import-time debug printing from the Python package and the native module
+- Minimum supported Python version is now 3.9 (abi3-py39 wheels)
+- Removed deprecated `new()`/`with_model()` Rust constructors (deprecated since 0.2.0); use `new_with_model()`
+
+### Fixed
+- **Gemini structured outputs** previously sent OpenAI-style Bearer auth and always failed; Gemini now authenticates via the `x-goog-api-key` header on all paths
+- **Bedrock structured outputs** previously attempted a raw HTTP POST to the Bedrock endpoint; they now route through the AWS SDK like plain requests
+- Bedrock now works from the synchronous `inference` expression (previously returned an error)
+- TLS verification is no longer disabled (`danger_accept_invalid_certs` removed); the shared client uses rustls with the OS certificate store
+
+### Performance
+- Single shared HTTP client with connection pooling (previously a new client per batch)
+- Bounded request concurrency via buffered streams instead of unbounded `join_all`
+- JSON schemas are compiled once per batch instead of once per row
+- AWS Bedrock client/credential chain is cached per region instead of being rebuilt per request
+- Vector similarity ops (`cosine_similarity`, `dot_product`, `euclidean_distance`) use a contiguous-slice fast path
+- Tokenizer/pricing lookups hoisted out of per-row loops in cost expressions
+- Removed redundant per-row clones of schemas, models, and message batches in the expression layer (~400 lines of duplicated dispatch removed)
+
+### Security
+- **Fixed RUSTSEC-2025-0020** (pyo3 buffer overflow): upgraded pyo3 0.23 → 0.27 via pyo3-polars 0.26
+- Removed `ureq` 2.x and `once_cell` dependencies (sync path now reuses the async clients; `std::sync::LazyLock` replaces `once_cell`)
+- Updated polars 0.46 → 0.53, jsonschema 0.28 → 0.46, tiktoken-rs 0.6 → 0.12, aws-sdk-bedrockruntime to latest
+
 ## [0.2.2] - 2025-12-17
 
 ### Added

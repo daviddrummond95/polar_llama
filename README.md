@@ -16,6 +16,7 @@ Polar Llama is a Python library designed to enhance the efficiency of making par
 - **Structured Outputs**: Define response schemas using Pydantic models for type-safe, validated LLM outputs returned as Polars Structs with direct field access.
 - **Vector Similarity**: Rust-powered similarity metrics (cosine, dot product, Euclidean distance) for high-performance vector operations.
 - **Approximate Nearest Neighbor Search**: HNSW algorithm for fast semantic search and recommendations at scale.
+- **Prompt Optimization**: A DSPy-style optimization engine (`Signature`, `Predict`, `BootstrapFewShot`, `InstructionOptimizer`) that tunes instructions and few-shot demos against your labeled data using parallel batched evaluation.
 
 #### Installation
 
@@ -192,6 +193,62 @@ if error:
     print(f"Error: {error}")
     print(f"Details: {df['recommendation'].struct.field('_details')[0]}")
     print(f"Raw response: {df['recommendation'].struct.field('_raw')[0]}")
+```
+
+#### Prompt Optimization (DSPy-style)
+
+Polar Llama ships a lightweight prompt optimization engine inspired by [DSPy](https://github.com/stanfordnlp/dspy). Declare your task as a `Signature`, wrap it in a `Predict` module, and let an optimizer tune the prompt against your labeled DataFrame — every candidate is evaluated with one parallel, batched inference call:
+
+```python
+import polars as pl
+from polar_llama import Predict, Signature, BootstrapFewShot, InstructionOptimizer, evaluate
+
+# 1. Declare the task
+module = Predict(
+    Signature("question -> answer", instructions="Answer concisely."),
+    provider="openai",
+    model="gpt-4o-mini",
+)
+
+# 2. Labeled training data
+trainset = pl.DataFrame({
+    "question": ["What is 2+2?", "Capital of France?", "Largest planet?"],
+    "answer": ["4", "Paris", "Jupiter"],
+})
+
+# 3. A metric: (gold row, prediction) -> bool | float
+def exact_match(example, prediction):
+    return example["answer"].strip().lower() == (prediction["answer"] or "").strip().lower()
+
+# 4a. Bootstrap few-shot demos from rows the model already gets right
+compiled = BootstrapFewShot(metric=exact_match, max_demos=4).compile(module, trainset)
+
+# 4b. Or search for better instructions (COPRO-style)
+optimizer = InstructionOptimizer(metric=exact_match, n_candidates=4)
+compiled = optimizer.compile(module, trainset)
+print(optimizer.history)  # [(instructions, score), ...]
+
+# 5. Run the optimized module on new data — outputs land in pred_* columns
+result = compiled(pl.DataFrame({"question": ["What is 3+3?"]}))
+print(result["pred_answer"])
+
+# Score any module against a labeled set
+print(evaluate(compiled, trainset, exact_match).score)
+```
+
+Output fields can be typed and described for stronger structured outputs:
+
+```python
+from polar_llama import OutputField
+
+sig = Signature(
+    "review -> sentiment, confidence",
+    instructions="Classify the sentiment of the review.",
+    outputs={
+        "sentiment": OutputField(desc="one of: positive, negative, neutral"),
+        "confidence": OutputField(desc="confidence from 0.0 to 1.0", dtype=float),
+    },
+)
 ```
 
 #### Vector Embeddings

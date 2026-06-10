@@ -5,7 +5,7 @@
 
 use crate::model_client::Provider;
 use tiktoken_rs::{cl100k_base, o200k_base, CoreBPE};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::collections::HashMap;
 
 /// Pricing information for a model (costs per 1 million tokens in USD)
@@ -38,16 +38,30 @@ impl ModelPricing {
 
 /// Static pricing data for all supported models.
 /// Prices are in USD per 1 million tokens.
-/// Last updated: January 2025
+/// Last updated: June 2026
 ///
 /// Note: These prices should be periodically updated as providers change their pricing.
-static PRICING: Lazy<HashMap<(&'static str, &'static str), ModelPricing>> = Lazy::new(|| {
+static PRICING: LazyLock<HashMap<(&'static str, &'static str), ModelPricing>> = LazyLock::new(|| {
     let mut m = HashMap::new();
 
     // ============================================================================
     // OpenAI Models
     // https://openai.com/pricing
     // ============================================================================
+
+    // GPT-5 models
+    m.insert(("openai", "gpt-5"), ModelPricing::new(1.25, 10.00));
+    m.insert(("openai", "gpt-5-mini"), ModelPricing::new(0.25, 2.00));
+    m.insert(("openai", "gpt-5-nano"), ModelPricing::new(0.05, 0.40));
+
+    // GPT-4.1 models
+    m.insert(("openai", "gpt-4.1"), ModelPricing::new(2.00, 8.00));
+    m.insert(("openai", "gpt-4.1-mini"), ModelPricing::new(0.40, 1.60));
+    m.insert(("openai", "gpt-4.1-nano"), ModelPricing::new(0.10, 0.40));
+
+    // o-series reasoning models
+    m.insert(("openai", "o3"), ModelPricing::new(2.00, 8.00));
+    m.insert(("openai", "o4-mini"), ModelPricing::new(1.10, 4.40));
 
     // GPT-4o models
     m.insert(("openai", "gpt-4o"), ModelPricing::new(2.50, 10.00));
@@ -91,6 +105,24 @@ static PRICING: Lazy<HashMap<(&'static str, &'static str), ModelPricing>> = Lazy
     // https://www.anthropic.com/pricing
     // ============================================================================
 
+    // Claude 5 models
+    m.insert(("anthropic", "claude-fable-5"), ModelPricing::new(10.00, 50.00));
+
+    // Claude 4.x models
+    m.insert(("anthropic", "claude-opus-4-8"), ModelPricing::new(5.00, 25.00));
+    m.insert(("anthropic", "claude-opus-4-7"), ModelPricing::new(5.00, 25.00));
+    m.insert(("anthropic", "claude-opus-4-6"), ModelPricing::new(5.00, 25.00));
+    m.insert(("anthropic", "claude-opus-4-5"), ModelPricing::new(5.00, 25.00));
+    m.insert(("anthropic", "claude-opus-4-1"), ModelPricing::new(15.00, 75.00));
+    m.insert(("anthropic", "claude-opus-4-0"), ModelPricing::new(15.00, 75.00));
+    m.insert(("anthropic", "claude-sonnet-4-6"), ModelPricing::new(3.00, 15.00));
+    m.insert(("anthropic", "claude-sonnet-4-5"), ModelPricing::new(3.00, 15.00));
+    m.insert(("anthropic", "claude-sonnet-4-0"), ModelPricing::new(3.00, 15.00));
+    m.insert(("anthropic", "claude-haiku-4-5"), ModelPricing::new(1.00, 5.00));
+
+    // Claude 3.7 models
+    m.insert(("anthropic", "claude-3-7-sonnet-20250219"), ModelPricing::new(3.00, 15.00));
+
     // Claude 3.5 models
     m.insert(("anthropic", "claude-3-5-sonnet-20241022"), ModelPricing::new(3.00, 15.00));
     m.insert(("anthropic", "claude-3-5-sonnet-20240620"), ModelPricing::new(3.00, 15.00));
@@ -111,7 +143,14 @@ static PRICING: Lazy<HashMap<(&'static str, &'static str), ModelPricing>> = Lazy
     // https://ai.google.dev/pricing
     // ============================================================================
 
+    // Gemini 2.5 models
+    m.insert(("gemini", "gemini-2.5-pro"), ModelPricing::new(1.25, 10.00));
+    m.insert(("gemini", "gemini-2.5-flash"), ModelPricing::new(0.30, 2.50));
+    m.insert(("gemini", "gemini-2.5-flash-lite"), ModelPricing::new(0.10, 0.40));
+
     // Gemini 2.0 models
+    m.insert(("gemini", "gemini-2.0-flash"), ModelPricing::new(0.10, 0.40));
+    m.insert(("gemini", "gemini-2.0-flash-lite"), ModelPricing::new(0.075, 0.30));
     m.insert(("gemini", "gemini-2.0-flash-exp"), ModelPricing::new(0.00, 0.00)); // Free during preview
 
     // Gemini 1.5 models
@@ -154,6 +193,12 @@ static PRICING: Lazy<HashMap<(&'static str, &'static str), ModelPricing>> = Lazy
     // https://aws.amazon.com/bedrock/pricing/
     // Prices are for US East (N. Virginia) region
     // ============================================================================
+
+    // Claude 4.x via Bedrock (cross-region inference profiles)
+    m.insert(("bedrock", "us.anthropic.claude-haiku-4-5-20251001-v1:0"), ModelPricing::new(1.00, 5.00));
+    m.insert(("bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"), ModelPricing::new(3.00, 15.00));
+    m.insert(("bedrock", "anthropic.claude-haiku-4-5-20251001-v1:0"), ModelPricing::new(1.00, 5.00));
+    m.insert(("bedrock", "anthropic.claude-sonnet-4-5-20250929-v1:0"), ModelPricing::new(3.00, 15.00));
 
     // Claude 3.5 via Bedrock
     m.insert(("bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0"), ModelPricing::new(3.00, 15.00));
@@ -213,11 +258,11 @@ pub fn get_pricing_by_str(provider: &str, model: &str) -> Option<ModelPricing> {
 /// Get the default model pricing for a provider
 pub fn get_default_pricing(provider: Provider) -> Option<ModelPricing> {
     let model = match provider {
-        Provider::OpenAI => "gpt-4-turbo",
-        Provider::Anthropic => "claude-3-opus-20240229",
-        Provider::Gemini => "gemini-1.5-pro",
-        Provider::Groq => "llama3-70b-8192",
-        Provider::Bedrock => "anthropic.claude-3-haiku-20240307-v1:0",
+        Provider::OpenAI => crate::model_client::openai::DEFAULT_OPENAI_MODEL,
+        Provider::Anthropic => crate::model_client::anthropic::DEFAULT_ANTHROPIC_MODEL,
+        Provider::Gemini => crate::model_client::gemini::DEFAULT_GEMINI_MODEL,
+        Provider::Groq => crate::model_client::groq::DEFAULT_GROQ_MODEL,
+        Provider::Bedrock => crate::model_client::bedrock::DEFAULT_BEDROCK_MODEL,
     };
     get_pricing(provider, model)
 }
@@ -227,11 +272,11 @@ pub fn get_default_pricing(provider: Provider) -> Option<ModelPricing> {
 // ============================================================================
 
 /// Cached tokenizer instances for performance
-static CL100K_TOKENIZER: Lazy<CoreBPE> = Lazy::new(|| {
+static CL100K_TOKENIZER: LazyLock<CoreBPE> = LazyLock::new(|| {
     cl100k_base().expect("Failed to load cl100k_base tokenizer")
 });
 
-static O200K_TOKENIZER: Lazy<CoreBPE> = Lazy::new(|| {
+static O200K_TOKENIZER: LazyLock<CoreBPE> = LazyLock::new(|| {
     o200k_base().expect("Failed to load o200k_base tokenizer")
 });
 
@@ -248,10 +293,13 @@ pub enum TokenizerType {
 pub fn get_tokenizer_type(model: &str) -> TokenizerType {
     let model_lower = model.to_lowercase();
 
-    // o200k_base models (GPT-4o family, o1 family)
+    // o200k_base models (GPT-4o, GPT-4.1, GPT-5 families and o-series)
     if model_lower.contains("gpt-4o")
+        || model_lower.contains("gpt-4.1")
+        || model_lower.contains("gpt-5")
         || model_lower.starts_with("o1")
-        || model_lower.contains("o1-")
+        || model_lower.starts_with("o3")
+        || model_lower.starts_with("o4")
     {
         return TokenizerType::O200kBase;
     }
