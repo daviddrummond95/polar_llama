@@ -70,6 +70,8 @@ Polar Llama registers a `.llama` namespace on Polars expressions, providing a fl
 | `.llama.cosine_similarity(other)` | Calculate cosine similarity between vectors |
 | `.llama.dot_product(other)` | Calculate dot product between vectors |
 | `.llama.euclidean_distance(other)` | Calculate Euclidean distance between vectors |
+| `.llama.execute_tool_calls(...)` | Execute emitted tool calls batch-parallel (MCP or Python executor) |
+| `.llama.tool_results_to_message(role='user')` | Render tool results as a message for synthesis |
 
 ### Examples
 
@@ -1016,6 +1018,75 @@ df = df.with_columns(
         provider=Provider.OPENAI,
         model="text-embedding-3-small"
     )
+)
+```
+
+---
+
+### Tool Use (MCP)
+
+Dataframe-native tool calling: emission is structured output, execution is a
+batch-parallel expression, and every intermediate turn is a column. Full
+guide: [TOOL_USE.md](TOOL_USE.md); design rationale:
+[design/MCP_TOOL_INTEGRATION.md](design/MCP_TOOL_INTEGRATION.md).
+
+#### mcp_tools
+
+```python
+mcp_tools(transport: str, *, timeout_s: float = 30.0) -> list[dict]
+```
+
+Fetch tool definitions from an MCP server (`tools/list`). `transport` is a
+streamable-HTTP endpoint (`"http://host:port/mcp"`) or a stdio command
+(`"stdio:my-server --flag"`). Returns normalized specs
+`{name, description, input_schema}`.
+
+#### tools_to_response_model
+
+```python
+tools_to_response_model(tools, *, model_name: str = "ToolCalls") -> Type[BaseModel]
+```
+
+Build a Pydantic emission schema from tool definitions (MCP entries,
+Anthropic/OpenAI-style dicts, or Pydantic models). Pass the result as
+`response_model=` to any inference function; the LLM emits
+`{"calls": [{"tool_name", "arguments"}]}` as ordinary structured output.
+Nothing is executed at this step.
+
+#### execute_tool_calls
+
+```python
+execute_tool_calls(
+    expr,
+    *,
+    transport: str | None = None,     # MCP streamable-HTTP endpoint
+    executor: Callable | None = None, # or a Python callable (tool_name, args) -> content
+    tools: Sequence | None = None,    # optional: validate args against tool schemas
+    concurrency: int = 32,
+    timeout_s: int = 30,
+) -> pl.Expr
+```
+
+Execute a column of emitted tool calls, all calls of all rows in parallel.
+Returns `List[Struct{tool_name, arguments, content, is_error, _error}]`.
+Per-call failures are data, never exceptions; only an unreachable transport
+raises. Exactly one of `transport` / `executor` must be given.
+
+#### tool_results_to_message
+
+```python
+tool_results_to_message(expr, *, role: str = "user") -> pl.Expr
+```
+
+Render a results column as a message for the synthesis turn, ready for
+`combine_messages` + `inference_messages`.
+
+**Using .llama namespace:**
+```python
+df = df.with_columns(
+    results=pl.col("calls").llama.execute_tool_calls(transport="http://localhost:8811/mcp")
+).with_columns(
+    msg=pl.col("results").llama.tool_results_to_message()
 )
 ```
 

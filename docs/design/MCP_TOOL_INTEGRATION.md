@@ -1,6 +1,6 @@
 # Design Proposal: MCP / Tool Use in Polar Llama
 
-**Status:** Proposal — not accepted
+**Status:** Accepted — Phases 0–1 implemented (see `docs/TOOL_USE.md`); Phase 2 remains deferred
 **Author:** drafted for discussion
 **Date:** 2026-07-03
 

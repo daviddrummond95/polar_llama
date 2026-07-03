@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Tool use / MCP integration** (Phases 0–1 of `docs/design/MCP_TOOL_INTEGRATION.md`):
+  - `tools_to_response_model` — build a strict-mode-safe Pydantic emission schema
+    from tool definitions (MCP, Anthropic, OpenAI-function dicts, or Pydantic models),
+    so the LLM emits tool calls as ordinary structured output
+  - `mcp_tools` — introspect tool definitions from an MCP server (`tools/list`)
+    over streamable HTTP or stdio
+  - `execute_tool_calls` — execute a column of emitted tool calls batch-parallel
+    on the Rust async runtime against an MCP server (`tools/call`), or via a
+    Python `executor` callable for non-MCP targets; per-call failures are data
+    (`is_error`, `_error`), arguments are validated against each tool's input
+    schema before execution
+  - `tool_results_to_message` — render a results column as a message for the
+    synthesis turn
+  - `.llama.execute_tool_calls()` and `.llama.tool_results_to_message()` namespace methods
+  - New guide: `docs/TOOL_USE.md`; example: `examples/tool_use_calorie_tracker.py`
+
 ## [0.2.2] - 2025-12-17
 
 ### Added
