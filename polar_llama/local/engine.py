@@ -386,6 +386,40 @@ class MlxBatchEngine:
         # positionally.
         prompt_tokens = [list(self._encode(p)) for p in prompts]
 
+        # Opt-in batched *quantized* KV cache (Q4/Q8): set
+        # ``POLAR_LLAMA_LOCAL_KV_BITS=4`` (or 8) to fit larger batches / longer
+        # context in the same memory (see docs/batch_quantized_kv.md). Falls
+        # back silently to the stock fp16 path if the extra module or mlx-lm
+        # batching is unavailable. Verified within tolerance of fp16 batched
+        # output on Qwen3-8B (benchmarks/validate_quantized_kv.py).
+        kv_bits_env = os.environ.get("POLAR_LLAMA_LOCAL_KV_BITS")
+        if kv_bits_env:
+            try:
+                kv_bits = int(kv_bits_env)
+                kv_group_size = int(
+                    os.environ.get("POLAR_LLAMA_LOCAL_KV_GROUP_SIZE", "64")
+                )
+                from polar_llama.local.batch_quantized_kv import (  # type: ignore
+                    batch_generate_quantized,
+                    is_available as _bqkv_available,
+                )
+
+                if _bqkv_available():
+                    outputs = batch_generate_quantized(
+                        self._model,
+                        self._tokenizer,
+                        prompt_tokens,
+                        kv_bits=kv_bits,
+                        kv_group_size=kv_group_size,
+                        max_tokens=max_tokens,
+                        sampler=sampler,
+                        verbose=False,
+                    )
+                    texts = getattr(outputs, "texts", outputs)
+                    return [str(t) for t in texts]
+            except Exception:  # noqa: BLE001 -- never fail closed; use fp16 path
+                pass
+
         try:
             outputs = batch_generate(
                 self._model,

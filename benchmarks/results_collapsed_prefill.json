@@ -1,0 +1,81 @@
+{
+  "pass": true,
+  "results": [
+    {
+      "model": "mlx-community/gemma-3n-E4B-it-lm-4bit",
+      "rows": 32,
+      "max_tokens": 128,
+      "prefix_len": 1258,
+      "parity": {
+        "match": 32,
+        "near_tie": 0,
+        "mismatch": 0
+      },
+      "wall_s": {
+        "sequential": 56.567495584022254,
+        "naive_batched": 43.33888395805843,
+        "collapsed": 5.461753916926682
+      },
+      "eff_tok_s": {
+        "sequential": 11.172493911477163,
+        "naive_batched": 15.251892518498822,
+        "collapsed": 121.57266879823679
+      },
+      "peak_gb": {
+        "sequential": 5.002502654,
+        "naive_batched": 7.677572104,
+        "collapsed": 5.996683942
+      },
+      "prompt_tokens": {
+        "naive_batched": 41436,
+        "collapsed_incl_prefix": 2438
+      },
+      "speedup_vs_sequential": 10.357020188828402,
+      "speedup_vs_naive_batched": 7.934975580599782,
+      "prefix_prefill_s": 1.3338812091387808,
+      "sample_outputs": [
+        "Positive. The customer acknowledges a negative experience (late delivery) but also highlights positive support, indicating an overall positive sentiment.",
+        "Negative. The record describes a negative experience with a damaged product and slow support.",
+        "Negative. The statement includes a negative descriptor (\"rude\") outweighing the positive (\"early\")."
+      ]
+    },
+    {
+      "model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+      "rows": 8,
+      "max_tokens": 64,
+      "prefix_len": 1303,
+      "parity": {
+        "match": 8,
+        "near_tie": 0,
+        "mismatch": 0
+      },
+      "wall_s": {
+        "sequential": 2.761211291886866,
+        "naive_batched": 2.0611102918628603,
+        "collapsed": 0.6821426670067012
+      },
+      "eff_tok_s": {
+        "sequential": 81.48597706416261,
+        "naive_batched": 113.0458670357768,
+        "collapsed": 341.5707758355351
+      },
+      "peak_gb": {
+        "sequential": 1.292946468,
+        "naive_batched": 1.266497676,
+        "collapsed": 1.277625628
+      },
+      "prompt_tokens": {
+        "naive_batched": 10713,
+        "collapsed_incl_prefix": 1592
+      },
+      "speedup_vs_sequential": 4.047850142556382,
+      "speedup_vs_naive_batched": 3.0215237831510873,
+      "prefix_prefill_s": 0.19018945819698274,
+      "sample_outputs": [
+        "Positive. The customer is expressing satisfaction with the package and support they received.",
+        "Mixed. The customer's complaint about the laptop being damaged and the slow response from support indicates dissatisfaction with the service provided.",
+        "The sentiment is mixed. The customer is expressing dissatisfaction with the invoice and support staff, which indicates a negative sentiment. The tone and audience are not specified, so it's hard to determine the exact sentiment."
+      ]
+    }
+  ]
+}
