@@ -1,4 +1,5 @@
 #![allow(clippy::unused_unit)]
+use crate::cache::{self, CacheStrategy, CacheConfig};
 use crate::utils::*;
 use crate::model_client::{Provider, Message};
 use crate::cost;
@@ -32,6 +33,26 @@ pub struct InferenceKwargs {
     response_schema: Option<String>,
     #[serde(default)]
     response_model_name: Option<String>,
+
+    // === Caching options ===
+    /// Enable cache optimization (default: false)
+    #[serde(default)]
+    cache: Option<bool>,
+    /// Cache strategy: "auto", "system_prompt", "schema", "full_prefix", "none"
+    #[serde(default)]
+    cache_strategy: Option<String>,
+    /// Cache TTL for Anthropic: "5m" (default) or "1h"
+    #[serde(default)]
+    cache_ttl: Option<String>,
+    /// Optional cache key hint for OpenAI routing
+    #[serde(default)]
+    cache_key: Option<String>,
+    /// Minimum tokens to trigger caching (default: 1024)
+    #[serde(default)]
+    cache_min_tokens: Option<usize>,
+    /// System prompt to prepend to all messages (enables caching for inference_async)
+    #[serde(default)]
+    system_prompt: Option<String>,
 }
 
 fn parse_provider(provider_str: &str) -> Option<Provider> {
@@ -95,6 +116,88 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
 
     let ca: &StringChunked = input_series.str()?;
 
+    // Determine provider and model
+    let provider = kwargs.provider
+        .as_ref()
+        .and_then(|s| parse_provider(s))
+        .unwrap_or(Provider::OpenAI);
+
+    let model = kwargs.model
+        .clone()
+        .unwrap_or_else(|| get_default_model(provider).to_string());
+
+    // Check if caching is enabled with a system prompt
+    let cache_enabled = kwargs.cache.unwrap_or(false);
+
+    if let Some(system_prompt) = kwargs.system_prompt.as_ref().filter(|_| cache_enabled) {
+        // Use caching path: convert text prompts to message arrays with shared system prompt
+
+        // Build message arrays with shared system prompt
+        let mut arrays_with_indices: Vec<(usize, Vec<Message>)> = Vec::new();
+        for (idx, opt_value) in ca.into_iter().enumerate() {
+            if let Some(user_content) = opt_value {
+                let messages = vec![
+                    Message {
+                        role: "system".to_string(),
+                        content: system_prompt.clone(),
+                        cache_control: None,
+                    },
+                    Message {
+                        role: "user".to_string(),
+                        content: user_content.to_string(),
+                        cache_control: None,
+                    },
+                ];
+                arrays_with_indices.push((idx, messages));
+            }
+        }
+
+        let message_arrays: Vec<Vec<Message>> = arrays_with_indices.iter().map(|(_, arr)| arr.clone()).collect();
+
+        // Build cache config
+        let cache_config = CacheConfig {
+            strategy: kwargs.cache_strategy
+                .as_ref()
+                .map(|s| CacheStrategy::from_str(s))
+                .unwrap_or_default(),
+            ttl: kwargs.cache_ttl.clone().unwrap_or_else(|| "5m".to_string()),
+            cache_key: kwargs.cache_key.clone(),
+            min_tokens: kwargs.cache_min_tokens.unwrap_or(1024),
+            report_metrics: true,
+        };
+
+        // Analyze batch for cache groups
+        let cache_groups = cache::analyze_batch_for_caching(
+            &message_arrays,
+            cache_config.strategy,
+            cache_config.min_tokens,
+        );
+
+        // Process with cache optimization
+        let schema_owned = kwargs.response_schema.clone();
+        let model_name_owned = kwargs.response_model_name.clone();
+
+        let api_results = process_with_cache_groups(
+            message_arrays,
+            cache_groups,
+            provider,
+            &model,
+            &cache_config,
+            schema_owned.as_deref(),
+            model_name_owned.as_deref(),
+        );
+
+        // Map results back to original positions
+        let mut results: Vec<Option<String>> = vec![None; input_series.len()];
+        for ((idx, _), result) in arrays_with_indices.iter().zip(api_results.iter()) {
+            results[*idx] = result.clone();
+        }
+
+        let out = StringChunked::from_iter_options(input_series.name().clone(), results.into_iter());
+        return Ok(out.into_series());
+    }
+
+    // Non-caching path: original implementation
     // Collect all messages, keeping track of their original indices
     let mut indices: Vec<usize> = Vec::new();
     let mut messages: Vec<String> = Vec::new();
@@ -170,46 +273,183 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
         ).into_series());
     }
 
-    let ca: &StringChunked = input_series.str()?;
-
     // Collect message arrays, keeping track of their original indices
-    let mut indices: Vec<usize> = Vec::new();
-    let mut message_arrays: Vec<Vec<Message>> = Vec::new();
-    for (idx, opt) in ca.into_iter().enumerate() {
-        if let Some(s) = opt {
-            // Parse the JSON string into a vector of Messages
-            indices.push(idx);
-            message_arrays.push(crate::utils::parse_message_json(s).unwrap_or_default());
+    let mut arrays_with_indices: Vec<(usize, Vec<Message>)> = Vec::new();
+
+    // Handle both String (JSON) and List(Struct) inputs
+    match input_series.dtype() {
+        polars::datatypes::DataType::String => {
+            // Input is JSON strings - parse them
+            let ca: &StringChunked = input_series.str()?;
+            for (idx, opt) in ca.into_iter().enumerate() {
+                if let Some(s) = opt {
+                    let messages = crate::utils::parse_message_json(s).unwrap_or_default();
+                    arrays_with_indices.push((idx, messages));
+                }
+            }
+        }
+        polars::datatypes::DataType::List(_) => {
+            // List(Struct) input should be converted to JSON strings in Python
+            // before calling this function. Return an error if we get here.
+            return Err(polars::prelude::PolarsError::InvalidOperation(
+                "List input detected. Please convert to JSON strings using \
+                 .map_elements(lambda x: json.dumps(x.to_list()), return_dtype=pl.Utf8) \
+                 or use the inference_messages wrapper which handles this automatically.".into()
+            ));
+        }
+        other => {
+            return Err(polars::prelude::PolarsError::InvalidOperation(
+                format!("inference_messages expects String or List(Struct) input, got {other:?}").into()
+            ));
         }
     }
 
     let (provider, model) = resolve_provider_and_model(&kwargs);
-    let schema = kwargs.response_schema;
-    let model_name = kwargs.response_model_name;
+    let schema = kwargs.response_schema.clone();
+    let model_name = kwargs.response_model_name.clone();
 
-    let api_results = run_async(async move {
-        if schema.is_some() {
+    let message_arrays: Vec<Vec<Message>> =
+        arrays_with_indices.iter().map(|(_, arr)| arr.clone()).collect();
+
+    // Check if caching is enabled
+    let cache_enabled = kwargs.cache.unwrap_or(false);
+
+    // Get results based on caching, provider and model
+    let api_results = if cache_enabled {
+        // Build cache config from kwargs
+        let cache_config = CacheConfig {
+            strategy: kwargs.cache_strategy
+                .as_ref()
+                .map(|s| CacheStrategy::from_str(s))
+                .unwrap_or_default(),
+            ttl: kwargs.cache_ttl.clone().unwrap_or_else(|| "5m".to_string()),
+            cache_key: kwargs.cache_key.clone(),
+            min_tokens: kwargs.cache_min_tokens.unwrap_or(1024),
+            report_metrics: true,
+        };
+
+        // Analyze batch to find cache groups
+        let cache_groups = cache::analyze_batch_for_caching(
+            &message_arrays,
+            cache_config.strategy,
+            cache_config.min_tokens,
+        );
+
+        process_with_cache_groups(
+            message_arrays,
+            cache_groups,
+            provider,
+            &model,
+            &cache_config,
+            schema.as_deref(),
+            model_name.as_deref(),
+        )
+    } else if schema.is_some() {
+        // Use structured output with validation (non-cached)
+        let schema_owned = schema.clone();
+        let model_name_owned = model_name.clone();
+        let arrays_owned = message_arrays.clone();
+        let model_owned = model.clone();
+
+        run_async(async move {
             crate::utils::fetch_data_message_arrays_with_provider_and_schema(
-                &message_arrays,
-                provider,
-                &model,
-                schema.as_deref(),
-                model_name.as_deref(),
+                &arrays_owned, provider, &model_owned,
+                schema_owned.as_deref(), model_name_owned.as_deref()
             ).await
-        } else {
-            crate::utils::fetch_data_message_arrays_with_provider(&message_arrays, provider, &model).await
-        }
-    });
+        })
+    } else {
+        // Use regular inference without structured output (non-cached)
+        let arrays_owned = message_arrays.clone();
+        let model_owned = model.clone();
+
+        run_async(async move {
+            crate::utils::fetch_data_message_arrays_with_provider(&arrays_owned, provider, &model_owned).await
+        })
+    };
 
     // Map results back to original positions
-    let mut results: Vec<Option<String>> = vec![None; ca.len()];
-    for (idx, result) in indices.into_iter().zip(api_results) {
-        results[idx] = result;
+    let mut results: Vec<Option<String>> = vec![None; input_series.len()];
+    for ((idx, _), result) in arrays_with_indices.iter().zip(api_results.iter()) {
+        results[*idx] = result.clone();
     }
 
-    let out = StringChunked::from_iter_options(ca.name().clone(), results.into_iter());
+    let out = StringChunked::from_iter_options(input_series.name().clone(), results.into_iter());
 
     Ok(out.into_series())
+}
+
+/// Process message arrays with cache group optimization
+fn process_with_cache_groups(
+    message_arrays: Vec<Vec<Message>>,
+    cache_groups: Vec<cache::CacheGroup>,
+    provider: Provider,
+    model: &str,
+    config: &CacheConfig,
+    response_schema: Option<&str>,
+    response_model_name: Option<&str>,
+) -> Vec<Option<String>> {
+    let total_rows = message_arrays.len();
+    let mut all_results: Vec<(usize, Option<String>)> = Vec::with_capacity(total_rows);
+
+    // Process each cache group
+    // Groups are processed sequentially to ensure cache warming
+    // Within each group, first request warms cache, rest are parallel
+    for group in cache_groups {
+        // Prepare messages with cache control markers
+        let prepared_messages: Vec<Vec<Message>> = group.row_indices
+            .iter()
+            .map(|&row_idx| {
+                cache::prepare_messages_for_caching(
+                    message_arrays[row_idx].clone(),
+                    provider,
+                    config,
+                    group.cache_breakpoint_idx,
+                )
+            })
+            .collect();
+
+        // Execute with cache warming pattern
+        let group_results = if prepared_messages.len() > 1 {
+            let msgs = prepared_messages.clone();
+            let m = model.to_string();
+            let schema = response_schema.map(|s| s.to_string());
+            let model_name = response_model_name.map(|s| s.to_string());
+
+            run_async(async move {
+                crate::utils::fetch_with_cache_warming(
+                    &msgs, provider, &m,
+                    schema.as_deref(), model_name.as_deref()
+                ).await
+            })
+        } else {
+            // Single row in group - no cache warming benefit
+            let msgs = prepared_messages.clone();
+            let m = model.to_string();
+            let schema = response_schema.map(|s| s.to_string());
+            let model_name = response_model_name.map(|s| s.to_string());
+
+            run_async(async move {
+                if schema.is_some() {
+                    crate::utils::fetch_data_message_arrays_with_provider_and_schema(
+                        &msgs, provider, &m,
+                        schema.as_deref(), model_name.as_deref()
+                    ).await
+                } else {
+                    crate::utils::fetch_data_message_arrays_with_provider(&msgs, provider, &m).await
+                }
+            })
+        };
+
+        // Map results back to original indices
+        for (within_group_idx, result) in group_results.into_iter().enumerate() {
+            let original_idx = group.row_indices[within_group_idx];
+            all_results.push((original_idx, result));
+        }
+    }
+
+    // Sort by original index and extract results
+    all_results.sort_by_key(|(idx, _)| *idx);
+    all_results.into_iter().map(|(_, r)| r).collect()
 }
 
 // Function to combine multiple message expressions into a single JSON array
@@ -588,6 +828,289 @@ fn knn_output_type(_input_fields: &[Field]) -> PolarsResult<Field> {
         PlSmallStr::from_static(""),
         DataType::List(Box::new(DataType::Int64)),
     ))
+}
+
+// ============================================================================
+// Tool Call Execution (MCP)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ExecuteToolCallsKwargs {
+    /// MCP streamable-HTTP endpoint, e.g. "http://localhost:8811/mcp"
+    transport: String,
+    /// Max in-flight tool calls across the whole batch
+    #[serde(default = "default_tool_concurrency")]
+    concurrency: usize,
+    /// Per-call timeout in seconds
+    #[serde(default = "default_tool_timeout")]
+    timeout_s: u64,
+    /// Optional JSON object mapping tool name -> input JSON schema.
+    /// When present, arguments are validated before any network call.
+    #[serde(default)]
+    tool_schemas: Option<String>,
+}
+
+fn default_tool_concurrency() -> usize {
+    32
+}
+
+fn default_tool_timeout() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ToolCallSpec {
+    tool_name: String,
+    /// Arguments either as a JSON-encoded string (strict-mode emission form)
+    /// or as an inline JSON object.
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+/// Parse one row's JSON array of tool calls.
+fn parse_tool_calls_row(row: &str) -> Result<Vec<ToolCallSpec>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(row).map_err(|e| format!("invalid tool call JSON: {e}"))?;
+    match value {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .map(|item| {
+                serde_json::from_value::<ToolCallSpec>(item)
+                    .map_err(|e| format!("invalid tool call object: {e}"))
+            })
+            .collect(),
+        serde_json::Value::Object(_) => {
+            // Accept a bare single call for convenience
+            serde_json::from_value::<ToolCallSpec>(value)
+                .map(|c| vec![c])
+                .map_err(|e| format!("invalid tool call object: {e}"))
+        }
+        serde_json::Value::Null => Ok(vec![]),
+        _ => Err("expected a JSON array of tool calls".to_string()),
+    }
+}
+
+/// Normalize arguments: emission carries them as a JSON-encoded string
+/// (the strict-mode-safe form); accept inline objects too.
+fn normalize_arguments(raw: &serde_json::Value) -> Result<serde_json::Value, String> {
+    match raw {
+        serde_json::Value::String(s) => {
+            if s.trim().is_empty() {
+                return Ok(serde_json::json!({}));
+            }
+            serde_json::from_str::<serde_json::Value>(s)
+                .map_err(|e| format!("arguments is not valid JSON: {e}"))
+        }
+        serde_json::Value::Null => Ok(serde_json::json!({})),
+        other => Ok(other.clone()),
+    }
+}
+
+fn tool_result_json(
+    spec: &ToolCallSpec,
+    content: Option<String>,
+    is_error: bool,
+    error: Option<String>,
+) -> serde_json::Value {
+    let arguments_str = match &spec.arguments {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    serde_json::json!({
+        "tool_name": spec.tool_name,
+        "arguments": arguments_str,
+        "content": content,
+        "is_error": is_error,
+        "_error": error,
+    })
+}
+
+/// Execute a column of emitted tool calls against an MCP server, in parallel
+/// across every call of every row. Input: Utf8 rows containing JSON arrays of
+/// {tool_name, arguments}. Output: Utf8 rows containing JSON arrays of
+/// {tool_name, arguments, content, is_error, _error}. Per-call failures are
+/// data, not exceptions; only an unreachable/misconfigured transport raises.
+#[polars_expr(output_type=String)]
+fn execute_tool_calls(inputs: &[Series], kwargs: ExecuteToolCallsKwargs) -> PolarsResult<Series> {
+    let input_series = &inputs[0];
+
+    if input_series.is_empty() || input_series.dtype() == &DataType::Null {
+        return Ok(StringChunked::from_iter_options(
+            input_series.name().clone(),
+            std::iter::empty::<Option<String>>(),
+        )
+        .into_series());
+    }
+
+    let ca: &StringChunked = input_series.str()?;
+
+    // Compile per-tool argument validators up front (config errors fail fast).
+    let validators: std::collections::HashMap<String, jsonschema::Validator> =
+        match &kwargs.tool_schemas {
+            Some(schemas_json) => {
+                let schemas: serde_json::Value = serde_json::from_str(schemas_json)
+                    .map_err(|e| {
+                        PolarsError::ComputeError(format!("invalid tool_schemas JSON: {e}").into())
+                    })?;
+                let obj = schemas.as_object().ok_or_else(|| {
+                    PolarsError::ComputeError("tool_schemas must be a JSON object".into())
+                })?;
+                let mut map = std::collections::HashMap::new();
+                for (name, schema) in obj {
+                    let validator = jsonschema::validator_for(schema).map_err(|e| {
+                        PolarsError::ComputeError(
+                            format!("invalid schema for tool '{name}': {e}").into(),
+                        )
+                    })?;
+                    map.insert(name.clone(), validator);
+                }
+                map
+            }
+            None => std::collections::HashMap::new(),
+        };
+
+    // Parse every row, flattening calls to (row, position) so all calls in
+    // the batch share one concurrency pool.
+    let mut rows: Vec<Option<Vec<ToolCallSpec>>> = Vec::with_capacity(ca.len());
+    let mut row_errors: Vec<Option<String>> = vec![None; ca.len()];
+    for (idx, opt_value) in ca.into_iter().enumerate() {
+        match opt_value {
+            Some(value) => match parse_tool_calls_row(value) {
+                Ok(calls) => rows.push(Some(calls)),
+                Err(e) => {
+                    row_errors[idx] = Some(e);
+                    rows.push(Some(vec![]));
+                }
+            },
+            None => rows.push(None),
+        }
+    }
+
+    // Pre-resolve each call: validated + normalized arguments, or an
+    // immediate validation error that skips the network entirely.
+    enum Prepared {
+        Ready(serde_json::Value),
+        Invalid(String),
+    }
+    let mut flat: Vec<(usize, usize, ToolCallSpec, Prepared)> = Vec::new();
+    for (row_idx, row) in rows.iter().enumerate() {
+        if let Some(calls) = row {
+            for (call_idx, spec) in calls.iter().enumerate() {
+                let prepared = match normalize_arguments(&spec.arguments) {
+                    Ok(args) => match validators.get(&spec.tool_name) {
+                        Some(validator) if !validator.is_valid(&args) => {
+                            let errors: Vec<String> = validator
+                                .iter_errors(&args)
+                                .map(|e| format!("{} at {}", e, e.instance_path()))
+                                .collect();
+                            Prepared::Invalid(format!(
+                                "argument validation failed: {}",
+                                errors.join("; ")
+                            ))
+                        }
+                        _ => Prepared::Ready(args),
+                    },
+                    Err(e) => Prepared::Invalid(e),
+                };
+                flat.push((row_idx, call_idx, spec.clone(), prepared));
+            }
+        }
+    }
+
+    let transport = kwargs.transport.clone();
+    let timeout = std::time::Duration::from_secs(kwargs.timeout_s.max(1));
+    let concurrency = kwargs.concurrency.max(1);
+
+    // One handshake per batch; an unreachable transport is a config error.
+    let client = run_async(async move { crate::mcp::McpHttpClient::connect(&transport, timeout).await })
+        .map_err(|e| {
+            PolarsError::ComputeError(
+                format!("failed to connect to MCP server '{}': {e}", kwargs.transport).into(),
+            )
+        })?;
+
+    // Fan out every ready call through a shared semaphore.
+    let outcomes: Vec<(usize, usize, serde_json::Value)> = {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let mut handles = Vec::with_capacity(flat.len());
+
+        for (row_idx, call_idx, spec, prepared) in flat {
+            match prepared {
+                Prepared::Invalid(msg) => {
+                    handles.push(TaskOrReady::Ready((
+                        row_idx,
+                        call_idx,
+                        tool_result_json(&spec, None, true, Some(msg)),
+                    )));
+                }
+                Prepared::Ready(args) => {
+                    let client = client.clone();
+                    let semaphore = semaphore.clone();
+                    handles.push(TaskOrReady::Task(RT.spawn(async move {
+                        let _permit = semaphore.acquire().await.expect("semaphore closed");
+                        let outcome = client.call_tool(&spec.tool_name, &args).await;
+                        (
+                            row_idx,
+                            call_idx,
+                            tool_result_json(&spec, outcome.content, outcome.is_error, outcome.error),
+                        )
+                    })));
+                }
+            }
+        }
+
+        run_async(async move {
+            let mut results = Vec::with_capacity(handles.len());
+            for handle in handles {
+                match handle {
+                    TaskOrReady::Ready(r) => results.push(r),
+                    TaskOrReady::Task(t) => results.push(t.await.expect("tool call task panicked")),
+                }
+            }
+            results
+        })
+    };
+
+    // Reassemble per-row JSON arrays, preserving emission order within rows.
+    let mut per_row: Vec<Option<Vec<(usize, serde_json::Value)>>> = rows
+        .iter()
+        .map(|r| r.as_ref().map(|calls| Vec::with_capacity(calls.len())))
+        .collect();
+    for (row_idx, call_idx, result) in outcomes {
+        if let Some(Some(row)) = per_row.get_mut(row_idx) {
+            row.push((call_idx, result));
+        }
+    }
+
+    let results: Vec<Option<String>> = per_row
+        .into_iter()
+        .enumerate()
+        .map(|(idx, opt_row)| {
+            opt_row.map(|mut row| {
+                row.sort_by_key(|(call_idx, _)| *call_idx);
+                let mut values: Vec<serde_json::Value> =
+                    row.into_iter().map(|(_, v)| v).collect();
+                if let Some(parse_err) = &row_errors[idx] {
+                    values.push(serde_json::json!({
+                        "tool_name": null,
+                        "arguments": null,
+                        "content": null,
+                        "is_error": true,
+                        "_error": parse_err,
+                    }));
+                }
+                serde_json::Value::Array(values).to_string()
+            })
+        })
+        .collect();
+
+    let out = StringChunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+enum TaskOrReady {
+    Task(tokio::task::JoinHandle<(usize, usize, serde_json::Value)>),
+    Ready((usize, usize, serde_json::Value)),
 }
 
 // ============================================================================

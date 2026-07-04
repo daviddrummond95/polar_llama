@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2026-06-10
 
 ### Added
+- **Tool use / MCP integration** (`tools_to_response_model`, `mcp_tools`, `execute_tool_calls`, `tool_results_to_message`, and `.llama` namespace methods): LLMs emit tool calls as structured output and `execute_tool_calls` runs every call of every row batch-parallel against an MCP server (`tools/call`) or a Python `executor` callable; per-call failures are data. Guide: `docs/TOOL_USE.md`; example: `examples/tool_use_calorie_tracker.py`.
+- **Provider-native prompt caching** (`cache=True` / `CacheConfig`): shares a cached system prefix across rows via Anthropic `cache_control` content blocks, with 5-minute and 1-hour (`ttl="1h"`, `extended-cache-ttl` beta) TTLs; `inference_messages` now also accepts List(Struct) input in addition to JSON strings.
 - **DSPy-style prompt optimization engine** (`polar_llama.optimize`):
   - `Signature` — declarative task specs (`"question -> answer"` shorthand or explicit `InputField`/`OutputField` with types and descriptions)
   - `Predict` — executable LLM module that runs one parallel, batched inference per DataFrame and returns `pred_<field>` columns

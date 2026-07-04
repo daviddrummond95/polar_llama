@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
 use super::{ModelClient, ModelClientError, Message, Provider};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use reqwest::Client;
 
 /// Default Anthropic model
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-opus-4-8";
@@ -12,6 +13,26 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Maximum tokens to generate. The Messages API requires this parameter;
 /// 4096 is supported by every Claude model.
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+/// System content block with optional cache_control for Anthropic
+#[derive(Debug, Clone, Serialize)]
+struct SystemContentBlock {
+    #[serde(rename = "type")]
+    content_type: String,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControlMarker>,
+}
+
+/// Cache control marker for Anthropic's prompt caching
+#[derive(Debug, Clone, Serialize)]
+struct CacheControlMarker {
+    #[serde(rename = "type")]
+    cache_type: String,
+    /// Extended TTL ("1h"); omitted for the default 5-minute cache.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -96,8 +117,9 @@ impl ModelClient for AnthropicClient {
     }
 
     fn format_request_body(&self, messages: &[Message], schema: Option<&str>, model_name: Option<&str>) -> Value {
-        // Extract the first system message if present
-        let system = messages.iter().find(|msg| msg.role == "system");
+        // Check if any system message has cache_control
+        let has_cache_control = messages.iter()
+            .any(|msg| msg.role == "system" && msg.cache_control.is_some());
 
         // Format messages (excluding system)
         let formatted_messages = self.format_messages(messages);
@@ -108,9 +130,31 @@ impl ModelClient for AnthropicClient {
             "max_tokens": DEFAULT_MAX_TOKENS
         });
 
-        // Add system parameter if we found a system message
-        if let Some(system_message) = system {
-            request["system"] = json!(system_message.content);
+        // Handle system messages - use content blocks if cache_control is present
+        let system_messages: Vec<&Message> = messages.iter()
+            .filter(|msg| msg.role == "system")
+            .collect();
+
+        if !system_messages.is_empty() {
+            if has_cache_control {
+                // Use content block format for cache_control support
+                let system_blocks: Vec<SystemContentBlock> = system_messages.iter()
+                    .map(|msg| SystemContentBlock {
+                        content_type: "text".to_string(),
+                        text: msg.content.clone(),
+                        cache_control: msg.cache_control.as_ref().map(|cc| CacheControlMarker {
+                            cache_type: cc.cache_type.clone(),
+                            ttl: cc.ttl.clone(),
+                        }),
+                    })
+                    .collect();
+                request["system"] = serde_json::to_value(system_blocks).unwrap_or(json!([]));
+            } else {
+                // Use simple string format for backward compatibility
+                if let Some(system_msg) = system_messages.first() {
+                    request["system"] = json!(system_msg.content);
+                }
+            }
         }
 
         // Structured outputs via forced tool use: works across all current
@@ -153,5 +197,40 @@ impl ModelClient for AnthropicClient {
             .find(|content| content.content_type == "text")
             .and_then(|content| content.text)
             .ok_or_else(|| ModelClientError::ParseError("No text or tool_use content found".to_string()))
+    }
+
+    async fn send_request_structured(
+        &self,
+        client: &Client,
+        messages: &[Message],
+        schema: Option<&str>,
+        model_name: Option<&str>,
+    ) -> Result<String, ModelClientError> {
+        let api_key = self.get_api_key();
+        let body = self.format_request_body(messages, schema, model_name);
+
+        let mut request = self.apply_auth(client.post(self.api_endpoint()), &api_key);
+
+        // Prompt-caching beta header(s); extended (1h) TTL needs the extra beta.
+        if messages.iter().any(|msg| msg.cache_control.is_some()) {
+            let needs_extended_ttl = messages.iter().any(|msg| {
+                msg.cache_control.as_ref().and_then(|cc| cc.ttl.as_deref()) == Some("1h")
+            });
+            let beta = if needs_extended_ttl {
+                "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+            } else {
+                "prompt-caching-2024-07-31"
+            };
+            request = request.header("anthropic-beta", beta);
+        }
+
+        let response = request.json(&body).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if status.is_success() {
+            self.parse_response(&text)
+        } else {
+            Err(ModelClientError::Http(status.as_u16(), text))
+        }
     }
 }

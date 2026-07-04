@@ -1,8 +1,10 @@
+pub mod cache;
 mod expressions;
 pub mod utils;
 pub mod model_client;
 pub mod ann;
 pub mod cost;
+pub mod mcp;
 
 #[cfg(target_os = "linux")]
 use jemallocator::Jemalloc;

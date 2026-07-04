@@ -40,10 +40,16 @@ fn max_concurrency() -> usize {
         .unwrap_or(64)
 }
 
+use crate::cache::CacheControl;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: String,
+    /// Cache control marker for Anthropic/Bedrock
+    /// Only serialized when present
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -417,6 +423,7 @@ fn to_user_message_arrays(messages: &[String]) -> Vec<Vec<Message>> {
             vec![Message {
                 role: "user".to_string(),
                 content: content.clone(),
+                cache_control: None,
             }]
         })
         .collect()
