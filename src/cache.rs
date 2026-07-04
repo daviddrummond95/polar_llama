@@ -155,13 +155,15 @@ fn group_by_system_prompt(message_arrays: &[Vec<Message>], min_tokens: usize) ->
         // Estimate token count (rough: ~4 chars per token)
         let estimated_tokens: usize = system_messages.iter().map(|m| m.content.len() / 4).sum();
 
-        // Only group if prefix meets minimum token threshold
-        if estimated_tokens < min_tokens && !system_messages.is_empty() {
-            // Below threshold - treat as individual row
+        // No cacheable system prefix, or the prefix is below the minimum token
+        // threshold: treat as an individual, non-cached row. Rows with no system
+        // message must NOT fall through to hashing, or they would all share the
+        // empty-prefix hash and be lumped into one serial cache group.
+        if system_messages.is_empty() || estimated_tokens < min_tokens {
             groups.insert(
-                format!("individual_{}", idx),
+                format!("individual_{idx}"),
                 CacheGroup {
-                    prefix_hash: format!("individual_{}", idx),
+                    prefix_hash: format!("individual_{idx}"),
                     row_indices: vec![idx],
                     shared_prefix: vec![],
                     cache_breakpoint_idx: 0,

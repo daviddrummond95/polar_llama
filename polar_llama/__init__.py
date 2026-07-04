@@ -588,20 +588,9 @@ def inference_messages(
     """
     expr = parse_into_expr(expr)
 
-    # Convert List(Struct) to JSON strings if needed
-    # This handles the common case of passing Python list of dicts
-    def _convert_list_to_json(s: pl.Series) -> pl.Series:
-        """Convert a List(Struct) series to JSON strings."""
-        if s.dtype == pl.Utf8 or s.dtype == pl.String:
-            return s  # Already strings
-        # Use map_elements to serialize each element to JSON
-        return s.map_elements(
-            lambda x: json.dumps(x.to_list()) if x is not None else None,
-            return_dtype=pl.Utf8
-        )
-
-    # Wrap expr to convert List types to JSON
-    expr = expr.map_batches(_convert_list_to_json, return_dtype=pl.Utf8)
+    # Both JSON-string input and List(Struct{role, content}) input are handled
+    # natively by the Rust `inference_messages` expression, so no Python UDF
+    # (map_batches) is needed here — the default path stays lazy/streaming.
 
     # Convert Provider to string to make it picklable. All keys are always
     # present (None values deserialize to Option::None) because polars
