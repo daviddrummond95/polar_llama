@@ -8,7 +8,7 @@ name = "polar_llama"
 crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
-pyo3-build-config = "0.23.5"
+pyo3-build-config = "0.27.2"
 
 [dependencies]
 # NOTE: pyo3 0.24 would fix RUSTSEC-2025-0020 but pyo3-polars 0.20.0 requires 0.23
@@ -31,13 +31,13 @@ ureq = { version = "2", features = ["tls"], default-features = false }
 tokio = { version = "1.41", features = ["full", "rt-multi-thread"] }
 once_cell = "1"
 async-trait = "0.1"
-aws-config = "1.1.0"
+aws-config = "1.8.11"
 aws-sdk-bedrockruntime = "1.116.0"
-jsonschema = "0.28"
+jsonschema = "0.37"
 # Approximate nearest neighbor search using HNSW
 instant-distance = { version = "0.6", features = ["with-serde"] }
 # Token counting for cost calculation (tiktoken compatible)
-tiktoken-rs = "0.6"
+tiktoken-rs = "0.9"
 # SHA-256 hashing for cache prefix detection
 sha2 = "0.10"
 

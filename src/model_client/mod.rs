@@ -285,7 +285,7 @@ pub fn validate_json_schema(response: &str, schema_str: &str) -> Result<(), Stri
         // Collect validation errors with details
         let errors: Vec<String> = compiled_schema
             .iter_errors(&response_value)
-            .map(|e| format!("{} at {}", e, e.instance_path))
+            .map(|e| format!("{} at {}", e, e.instance_path()))
             .collect();
 
         if errors.is_empty() {
