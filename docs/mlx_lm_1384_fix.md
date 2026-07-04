@@ -209,8 +209,10 @@ pristine mlx-lm 0.31.3 (see above).
 > - batched B=1 vs sequential: token-identical 4/4.
 > - 640-token generation through sliding-window rotation
 >   (`BatchRotatingKVCache`): token-identical to sequential for all 640 tokens.
-> - sequential outputs unchanged vs `main` (byte-identical on all test
->   prompts).
+> - greedy sequential *token* outputs byte-identical to `main` on all test
+>   prompts (the offset snapshot also corrects a latent `+L` shared-layer
+>   query-RoPE error in sequential mode, shifting shared-layer *logits*
+>   slightly — a second, quieter fix; greedy decoding is unaffected).
 > - control `Qwen2.5-0.5B-Instruct-4bit`: batched vs sequential token-identical
 >   4/4 (no regression).
 > - `mlx_lm.server` now returns correct completions for concurrent Gemma 3n
