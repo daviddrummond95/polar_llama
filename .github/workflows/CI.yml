@@ -88,8 +88,8 @@ jobs:
       - name: Run Python coverage
         run: |
           source .venv/bin/activate
-          # Run pytest with coverage
-          pytest tests --cov=polar_llama --cov-report=xml:coverage/python-coverage.xml --cov-report=term --ignore=tests/test_parallel_inference.py || true
+          # Run pytest with coverage (exclude Apple-GPU-only tests; local logic tests still run)
+          pytest tests --cov=polar_llama --cov-report=xml:coverage/python-coverage.xml --cov-report=term -m "not local_gpu" --ignore=tests/test_parallel_inference.py || true
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
@@ -189,8 +189,10 @@ jobs:
           # Copy test files to temp directory
           cp -r $GITHUB_WORKSPACE/tests .
 
-          # Run tests, excluding API integration tests (those run in test-llm-apis.yml workflow)
-          python -m pytest tests -v --tb=short --ignore=tests/test_parallel_inference.py
+          # Run tests, excluding API integration tests (those run in test-llm-apis.yml workflow).
+          # `-m "not local_gpu"` runs the CI-safe local-backend logic tests (marked `local`,
+          # FakeEngine, no mlx) while deselecting Apple-GPU-only tests (marked `local_gpu`).
+          python -m pytest tests -v --tb=short -m "not local_gpu" --ignore=tests/test_parallel_inference.py
       
       # Run pre-commit checks
       - name: Run pre-commit checks

@@ -45,9 +45,24 @@ dependencies = [
 "Source" = "https://github.com/daviddrummond95/polar_llama"
 "Documentation" = "https://github.com/daviddrummond95/polar_llama#readme"
 
+[project.optional-dependencies]
+local = [
+    "mlx>=0.31; python_version >= '3.10'",
+    # mlx-lm 0.31.3 pulls its own required transformers (>=5); do NOT cap it
+    # (a <5 pin makes this extra unsatisfiable). A smoke install of 0.31.3 ran
+    # batch_generate successfully against transformers>=5.
+    "mlx-lm>=0.31; python_version >= '3.10'",
+]
+
 [dependency-groups]
 dev = [
     "polars>=1.8.2",
     "pytest>=8.3.5",
     "python-dotenv>=1.0.1",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "local_gpu: requires Apple GPU + mlx (skipped in CI)",
+    "local: local backend logic tests (CI-safe)",
 ]
