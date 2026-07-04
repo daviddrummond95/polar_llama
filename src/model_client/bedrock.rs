@@ -7,7 +7,8 @@ use std::sync::LazyLock;
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::{
     types::{
-        ContentBlock, ConversationRole, Message as BedrockMessage, SystemContentBlock,
+        CachePointBlock, CachePointType, ContentBlock, ConversationRole,
+        Message as BedrockMessage, SystemContentBlock,
     },
     Client as AwsBedrockClient,
 };
@@ -56,16 +57,17 @@ impl BedrockClient {
         self
     }
 
-    fn convert_messages_to_bedrock(&self, messages: &[Message]) -> (Option<SystemContentBlock>, Vec<BedrockMessage>) {
-        let mut system_prompt = None;
+    fn convert_messages_to_bedrock(&self, messages: &[Message]) -> (Vec<SystemContentBlock>, Vec<BedrockMessage>) {
+        let mut system_blocks: Vec<SystemContentBlock> = Vec::new();
         let mut bedrock_messages = Vec::new();
+        let mut cache_requested = false;
 
         for msg in messages {
             match msg.role.as_str() {
                 "system" => {
-                    // Store the first system message encountered
-                    if system_prompt.is_none() {
-                        system_prompt = Some(SystemContentBlock::Text(msg.content.clone()));
+                    system_blocks.push(SystemContentBlock::Text(msg.content.clone()));
+                    if msg.cache_control.is_some() {
+                        cache_requested = true;
                     }
                 },
                 role => {
@@ -86,7 +88,19 @@ impl BedrockClient {
             }
         }
 
-        (system_prompt, bedrock_messages)
+        // Bedrock prompt caching: a CachePoint after the cached content marks the
+        // prefix boundary. Bedrock supports only the default (~5 minute) cache
+        // type; the extended 1h TTL of the Anthropic direct API is unavailable here.
+        if cache_requested && !system_blocks.is_empty() {
+            if let Ok(cache_point) = CachePointBlock::builder()
+                .r#type(CachePointType::Default)
+                .build()
+            {
+                system_blocks.push(SystemContentBlock::CachePoint(cache_point));
+            }
+        }
+
+        (system_blocks, bedrock_messages)
     }
 }
 
@@ -142,15 +156,15 @@ impl ModelClient for BedrockClient {
         // We don't use the reqwest client for Bedrock; we use the AWS SDK
         let bedrock_client = bedrock_client_for_region(&self.region).await;
 
-        let (system_prompt, bedrock_messages) = self.convert_messages_to_bedrock(messages);
+        let (system_blocks, bedrock_messages) = self.convert_messages_to_bedrock(messages);
 
         let mut converse_request = bedrock_client
             .converse()
             .model_id(&self.model)
             .set_messages(Some(bedrock_messages));
 
-        if let Some(system) = system_prompt {
-            converse_request = converse_request.system(system);
+        if !system_blocks.is_empty() {
+            converse_request = converse_request.set_system(Some(system_blocks));
         }
 
         let response = converse_request

@@ -9,6 +9,16 @@ fn load_env() {
     let _ = dotenvy::dotenv();
 }
 
+/// Serializes network-touching tests. Running them in parallel (`--test-threads`
+/// > 1) hammers provider endpoints concurrently and yields transient
+/// "error sending request" failures. Each test holds this for its whole body;
+/// lock poisoning is ignored so one failing test doesn't cascade.
+static NET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn network_guard() -> std::sync::MutexGuard<'static, ()> {
+    NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Helper function to check if a provider is configured
 fn is_provider_configured(provider: Provider) -> bool {
     load_env();
@@ -42,6 +52,7 @@ fn get_configured_providers() -> Vec<(Provider, &'static str)> {
 
 #[tokio::test]
 async fn test_single_message_inference() {
+    let _net = network_guard();
     load_env();
 
     let configured_providers = get_configured_providers();
@@ -76,6 +87,7 @@ async fn test_single_message_inference() {
 
 #[tokio::test]
 async fn test_parallel_execution() {
+    let _net = network_guard();
     load_env();
 
     let configured_providers = get_configured_providers();
@@ -125,6 +137,7 @@ async fn test_parallel_execution() {
 
 #[tokio::test]
 async fn test_conversation_with_message_arrays() {
+    let _net = network_guard();
     load_env();
 
     let configured_providers = get_configured_providers();
@@ -179,6 +192,7 @@ async fn test_conversation_with_message_arrays() {
 
 #[tokio::test]
 async fn test_system_message_support() {
+    let _net = network_guard();
     load_env();
 
     let configured_providers = get_configured_providers();
@@ -226,6 +240,7 @@ async fn test_system_message_support() {
 
 #[tokio::test]
 async fn test_parallel_execution_timing() {
+    let _net = network_guard();
     load_env();
 
     let configured_providers = get_configured_providers();
@@ -268,6 +283,7 @@ async fn test_parallel_execution_timing() {
 
 #[tokio::test]
 async fn test_error_handling_invalid_api_key() {
+    let _net = network_guard();
     println!("\n🧪 Testing error handling with invalid API key");
 
     // Temporarily set an invalid API key

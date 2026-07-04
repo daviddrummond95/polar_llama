@@ -2215,6 +2215,9 @@ dependencies = [
  "polars-compute",
  "polars-core",
  "polars-error",
+ "polars-io",
+ "polars-lazy",
+ "polars-ops",
  "polars-utils",
  "version_check",
 ]
@@ -2366,6 +2369,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "polars-expr"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2151f54b0ae5d6b86c3c47df0898ff90edfe774807823f742f36e44973d51ea1"
+dependencies = [
+ "bitflags",
+ "hashbrown 0.16.0",
+ "num-traits",
+ "polars-arrow",
+ "polars-buffer",
+ "polars-compute",
+ "polars-core",
+ "polars-io",
+ "polars-ops",
+ "polars-plan",
+ "polars-row",
+ "polars-utils",
+ "rand 0.9.2",
+ "rayon",
+ "recursive",
+ "version_check",
+]
+
+[[package]]
 name = "polars-ffi"
 version = "0.53.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2408,6 +2435,49 @@ dependencies = [
  "simdutf8",
  "tokio",
  "zmij",
+]
+
+[[package]]
+name = "polars-lazy"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "02e1e24d4db8c349e9576564cfff47a3f08bb831dba9168f6599be178bc725e8"
+dependencies = [
+ "bitflags",
+ "chrono",
+ "either",
+ "memchr",
+ "polars-arrow",
+ "polars-buffer",
+ "polars-compute",
+ "polars-core",
+ "polars-expr",
+ "polars-io",
+ "polars-mem-engine",
+ "polars-ops",
+ "polars-plan",
+ "polars-utils",
+ "rayon",
+ "version_check",
+]
+
+[[package]]
+name = "polars-mem-engine"
+version = "0.53.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c394e4cd90186043d4051ce118e90794afbe81ac5eb9a51e358a56728e8ebde3"
+dependencies = [
+ "memmap2",
+ "polars-arrow",
+ "polars-core",
+ "polars-error",
+ "polars-expr",
+ "polars-io",
+ "polars-ops",
+ "polars-plan",
+ "polars-utils",
+ "rayon",
+ "recursive",
 ]
 
 [[package]]

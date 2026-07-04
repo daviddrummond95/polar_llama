@@ -289,13 +289,28 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
             }
         }
         polars::datatypes::DataType::List(_) => {
-            // List(Struct) input should be converted to JSON strings in Python
-            // before calling this function. Return an error if we get here.
-            return Err(polars::prelude::PolarsError::InvalidOperation(
-                "List input detected. Please convert to JSON strings using \
-                 .map_elements(lambda x: json.dumps(x.to_list()), return_dtype=pl.Utf8) \
-                 or use the inference_messages wrapper which handles this automatically.".into()
-            ));
+            // List(Struct{role, content}) input: parse each row's list of message
+            // structs directly in Rust. This keeps the default path lazy/streaming
+            // instead of routing through a Python map_batches UDF.
+            let list_ca = input_series.list()?;
+            for (idx, opt_inner) in list_ca.amortized_iter().enumerate() {
+                if let Some(inner) = opt_inner {
+                    let inner = inner.deep_clone();
+                    let mut messages: Vec<Message> = Vec::new();
+                    if let Ok(struct_ca) = inner.struct_() {
+                        let role_field = struct_ca.field_by_name("role").ok();
+                        let content_field = struct_ca.field_by_name("content").ok();
+                        let roles = role_field.as_ref().and_then(|s| s.str().ok());
+                        let contents = content_field.as_ref().and_then(|s| s.str().ok());
+                        for i in 0..inner.len() {
+                            let role = roles.and_then(|c| c.get(i)).unwrap_or("user").to_string();
+                            let content = contents.and_then(|c| c.get(i)).unwrap_or("").to_string();
+                            messages.push(Message { role, content, cache_control: None });
+                        }
+                    }
+                    arrays_with_indices.push((idx, messages));
+                }
+            }
         }
         other => {
             return Err(polars::prelude::PolarsError::InvalidOperation(
