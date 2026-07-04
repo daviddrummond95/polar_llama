@@ -88,7 +88,7 @@ jobs:
           pytest tests --cov=polar_llama --cov-report=xml:coverage/python-coverage.xml --cov-report=term --ignore=tests/test_parallel_inference.py || true
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./coverage/cobertura.xml,./coverage/python-coverage.xml
           flags: unittests
