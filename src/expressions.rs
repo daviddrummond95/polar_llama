@@ -1134,7 +1134,7 @@ fn execute_tool_calls(inputs: &[Series], kwargs: ExecuteToolCallsKwargs) -> Pola
                         Some(validator) if !validator.is_valid(&args) => {
                             let errors: Vec<String> = validator
                                 .iter_errors(&args)
-                                .map(|e| format!("{} at {}", e, e.instance_path))
+                                .map(|e| format!("{} at {}", e, e.instance_path()))
                                 .collect();
                             Prepared::Invalid(format!(
                                 "argument validation failed: {}",
