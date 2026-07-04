@@ -1231,6 +1231,7 @@ class LlamaNamespace:
         response_model: Optional[Type['BaseModel']] = None,
         response_format: Optional[Type['BaseModel']] = None,
         cache: Union[bool, CacheConfig] = False,
+        system_prompt: Optional[str] = None,
     ) -> pl.Expr:
         """
         Asynchronously infer completions for the expression using an LLM.
@@ -1247,6 +1248,9 @@ class LlamaNamespace:
             Alias for response_model
         cache : bool or CacheConfig, optional
             Enable cache optimization for batch processing
+        system_prompt : str, optional
+            Shared system prompt cached across all rows when cache=True
+            (see the functional ``inference_async`` for details).
 
         Returns
         -------
@@ -1259,6 +1263,7 @@ class LlamaNamespace:
             model=model,
             response_model=response_model or response_format,
             cache=cache,
+            system_prompt=system_prompt,
         )
     
     def tag_taxonomy(

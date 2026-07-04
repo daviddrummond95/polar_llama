@@ -19,6 +19,9 @@ struct SystemContentBlock {
 struct CacheControlMarker {
     #[serde(rename = "type")]
     cache_type: String,
+    /// Extended TTL ("1h"); omitted for the default 5-minute cache.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +154,7 @@ impl ModelClient for AnthropicClient {
                         text: msg.content.clone(),
                         cache_control: msg.cache_control.as_ref().map(|cc| CacheControlMarker {
                             cache_type: cc.cache_type.clone(),
+                            ttl: cc.ttl.clone(),
                         }),
                     })
                     .collect();
@@ -224,9 +228,18 @@ impl ModelClient for AnthropicClient {
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json");
 
-        // Add prompt caching beta header if cache_control is present
+        // Add prompt caching beta header(s) if cache_control is present.
+        // Extended (1h) TTL additionally requires the extended-cache-ttl beta.
         if has_cache_control {
-            request = request.header("anthropic-beta", "prompt-caching-2024-07-31");
+            let needs_extended_ttl = messages.iter().any(|msg| {
+                msg.cache_control.as_ref().and_then(|cc| cc.ttl.as_deref()) == Some("1h")
+            });
+            let beta = if needs_extended_ttl {
+                "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+            } else {
+                "prompt-caching-2024-07-31"
+            };
+            request = request.header("anthropic-beta", beta);
         }
 
         let response = request.body(body).send().await?;
@@ -260,9 +273,18 @@ impl ModelClient for AnthropicClient {
             .header("anthropic-version", "2023-06-01")
             .header("Content-Type", "application/json");
 
-        // Add prompt caching beta header if cache_control is present
+        // Add prompt caching beta header(s) if cache_control is present.
+        // Extended (1h) TTL additionally requires the extended-cache-ttl beta.
         if has_cache_control {
-            request = request.header("anthropic-beta", "prompt-caching-2024-07-31");
+            let needs_extended_ttl = messages.iter().any(|msg| {
+                msg.cache_control.as_ref().and_then(|cc| cc.ttl.as_deref()) == Some("1h")
+            });
+            let beta = if needs_extended_ttl {
+                "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
+            } else {
+                "prompt-caching-2024-07-31"
+            };
+            request = request.header("anthropic-beta", beta);
         }
 
         let response = request.body(body).send().await?;

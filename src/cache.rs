@@ -27,6 +27,9 @@ pub enum CacheStrategy {
 }
 
 impl CacheStrategy {
+    // Infallible parser (unknown input falls back to Auto), so it intentionally
+    // returns Self rather than Result; not the std FromStr trait.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "none" => Self::None,
@@ -80,7 +83,10 @@ pub struct CacheGroup {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheControl {
     #[serde(rename = "type")]
-    pub cache_type: String, // "ephemeral" or "ephemeral_1h"
+    pub cache_type: String, // always "ephemeral"
+    /// Extended TTL: Some("1h") requests 1-hour caching, None uses the default 5m.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
 }
 
 /// Analyze a batch of message arrays to identify optimal cache groups
@@ -237,9 +243,10 @@ pub fn prepare_messages_for_caching(
 fn inject_cache_control_marker(messages: &mut [Message], breakpoint_idx: usize, ttl: &str) {
     if let Some(msg) = messages.get_mut(breakpoint_idx) {
         msg.cache_control = Some(CacheControl {
-            cache_type: match ttl {
-                "1h" | "1hour" | "60m" => "ephemeral_1h".to_string(),
-                _ => "ephemeral".to_string(),
+            cache_type: "ephemeral".to_string(),
+            ttl: match ttl {
+                "1h" | "1hour" | "60m" => Some("1h".to_string()),
+                _ => None,
             },
         });
     }
@@ -469,9 +476,8 @@ mod tests {
         inject_cache_control_marker(&mut messages2, 0, "1h");
 
         assert!(messages2[0].cache_control.is_some());
-        assert_eq!(
-            messages2[0].cache_control.as_ref().unwrap().cache_type,
-            "ephemeral_1h"
-        );
+        let cc = messages2[0].cache_control.as_ref().unwrap();
+        assert_eq!(cc.cache_type, "ephemeral");
+        assert_eq!(cc.ttl.as_deref(), Some("1h"));
     }
 }

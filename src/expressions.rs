@@ -126,9 +126,8 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
     // Check if caching is enabled with a system prompt
     let cache_enabled = kwargs.cache.unwrap_or(false);
 
-    if cache_enabled && kwargs.system_prompt.is_some() {
+    if let Some(system_prompt) = kwargs.system_prompt.as_ref().filter(|_| cache_enabled) {
         // Use caching path: convert text prompts to message arrays with shared system prompt
-        let system_prompt = kwargs.system_prompt.as_ref().unwrap();
 
         // Build message arrays with shared system prompt
         let mut arrays_with_indices: Vec<(usize, Vec<Message>)> = Vec::new();
