@@ -964,6 +964,289 @@ fn knn_output_type(_input_fields: &[Field]) -> PolarsResult<Field> {
 }
 
 // ============================================================================
+// Tool Call Execution (MCP)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ExecuteToolCallsKwargs {
+    /// MCP streamable-HTTP endpoint, e.g. "http://localhost:8811/mcp"
+    transport: String,
+    /// Max in-flight tool calls across the whole batch
+    #[serde(default = "default_tool_concurrency")]
+    concurrency: usize,
+    /// Per-call timeout in seconds
+    #[serde(default = "default_tool_timeout")]
+    timeout_s: u64,
+    /// Optional JSON object mapping tool name -> input JSON schema.
+    /// When present, arguments are validated before any network call.
+    #[serde(default)]
+    tool_schemas: Option<String>,
+}
+
+fn default_tool_concurrency() -> usize {
+    32
+}
+
+fn default_tool_timeout() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ToolCallSpec {
+    tool_name: String,
+    /// Arguments either as a JSON-encoded string (strict-mode emission form)
+    /// or as an inline JSON object.
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+/// Parse one row's JSON array of tool calls.
+fn parse_tool_calls_row(row: &str) -> Result<Vec<ToolCallSpec>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(row).map_err(|e| format!("invalid tool call JSON: {e}"))?;
+    match value {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .map(|item| {
+                serde_json::from_value::<ToolCallSpec>(item)
+                    .map_err(|e| format!("invalid tool call object: {e}"))
+            })
+            .collect(),
+        serde_json::Value::Object(_) => {
+            // Accept a bare single call for convenience
+            serde_json::from_value::<ToolCallSpec>(value)
+                .map(|c| vec![c])
+                .map_err(|e| format!("invalid tool call object: {e}"))
+        }
+        serde_json::Value::Null => Ok(vec![]),
+        _ => Err("expected a JSON array of tool calls".to_string()),
+    }
+}
+
+/// Normalize arguments: emission carries them as a JSON-encoded string
+/// (the strict-mode-safe form); accept inline objects too.
+fn normalize_arguments(raw: &serde_json::Value) -> Result<serde_json::Value, String> {
+    match raw {
+        serde_json::Value::String(s) => {
+            if s.trim().is_empty() {
+                return Ok(serde_json::json!({}));
+            }
+            serde_json::from_str::<serde_json::Value>(s)
+                .map_err(|e| format!("arguments is not valid JSON: {e}"))
+        }
+        serde_json::Value::Null => Ok(serde_json::json!({})),
+        other => Ok(other.clone()),
+    }
+}
+
+fn tool_result_json(
+    spec: &ToolCallSpec,
+    content: Option<String>,
+    is_error: bool,
+    error: Option<String>,
+) -> serde_json::Value {
+    let arguments_str = match &spec.arguments {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    serde_json::json!({
+        "tool_name": spec.tool_name,
+        "arguments": arguments_str,
+        "content": content,
+        "is_error": is_error,
+        "_error": error,
+    })
+}
+
+/// Execute a column of emitted tool calls against an MCP server, in parallel
+/// across every call of every row. Input: Utf8 rows containing JSON arrays of
+/// {tool_name, arguments}. Output: Utf8 rows containing JSON arrays of
+/// {tool_name, arguments, content, is_error, _error}. Per-call failures are
+/// data, not exceptions; only an unreachable/misconfigured transport raises.
+#[polars_expr(output_type=String)]
+fn execute_tool_calls(inputs: &[Series], kwargs: ExecuteToolCallsKwargs) -> PolarsResult<Series> {
+    let input_series = &inputs[0];
+
+    if input_series.is_empty() || input_series.dtype() == &DataType::Null {
+        return Ok(StringChunked::from_iter_options(
+            input_series.name().clone(),
+            std::iter::empty::<Option<String>>(),
+        )
+        .into_series());
+    }
+
+    let ca: &StringChunked = input_series.str()?;
+
+    // Compile per-tool argument validators up front (config errors fail fast).
+    let validators: std::collections::HashMap<String, jsonschema::Validator> =
+        match &kwargs.tool_schemas {
+            Some(schemas_json) => {
+                let schemas: serde_json::Value = serde_json::from_str(schemas_json)
+                    .map_err(|e| {
+                        PolarsError::ComputeError(format!("invalid tool_schemas JSON: {e}").into())
+                    })?;
+                let obj = schemas.as_object().ok_or_else(|| {
+                    PolarsError::ComputeError("tool_schemas must be a JSON object".into())
+                })?;
+                let mut map = std::collections::HashMap::new();
+                for (name, schema) in obj {
+                    let validator = jsonschema::validator_for(schema).map_err(|e| {
+                        PolarsError::ComputeError(
+                            format!("invalid schema for tool '{name}': {e}").into(),
+                        )
+                    })?;
+                    map.insert(name.clone(), validator);
+                }
+                map
+            }
+            None => std::collections::HashMap::new(),
+        };
+
+    // Parse every row, flattening calls to (row, position) so all calls in
+    // the batch share one concurrency pool.
+    let mut rows: Vec<Option<Vec<ToolCallSpec>>> = Vec::with_capacity(ca.len());
+    let mut row_errors: Vec<Option<String>> = vec![None; ca.len()];
+    for (idx, opt_value) in ca.into_iter().enumerate() {
+        match opt_value {
+            Some(value) => match parse_tool_calls_row(value) {
+                Ok(calls) => rows.push(Some(calls)),
+                Err(e) => {
+                    row_errors[idx] = Some(e);
+                    rows.push(Some(vec![]));
+                }
+            },
+            None => rows.push(None),
+        }
+    }
+
+    // Pre-resolve each call: validated + normalized arguments, or an
+    // immediate validation error that skips the network entirely.
+    enum Prepared {
+        Ready(serde_json::Value),
+        Invalid(String),
+    }
+    let mut flat: Vec<(usize, usize, ToolCallSpec, Prepared)> = Vec::new();
+    for (row_idx, row) in rows.iter().enumerate() {
+        if let Some(calls) = row {
+            for (call_idx, spec) in calls.iter().enumerate() {
+                let prepared = match normalize_arguments(&spec.arguments) {
+                    Ok(args) => match validators.get(&spec.tool_name) {
+                        Some(validator) if !validator.is_valid(&args) => {
+                            let errors: Vec<String> = validator
+                                .iter_errors(&args)
+                                .map(|e| format!("{} at {}", e, e.instance_path()))
+                                .collect();
+                            Prepared::Invalid(format!(
+                                "argument validation failed: {}",
+                                errors.join("; ")
+                            ))
+                        }
+                        _ => Prepared::Ready(args),
+                    },
+                    Err(e) => Prepared::Invalid(e),
+                };
+                flat.push((row_idx, call_idx, spec.clone(), prepared));
+            }
+        }
+    }
+
+    let transport = kwargs.transport.clone();
+    let timeout = std::time::Duration::from_secs(kwargs.timeout_s.max(1));
+    let concurrency = kwargs.concurrency.max(1);
+
+    // One handshake per batch; an unreachable transport is a config error.
+    let client = run_async(async move { crate::mcp::McpHttpClient::connect(&transport, timeout).await })
+        .map_err(|e| {
+            PolarsError::ComputeError(
+                format!("failed to connect to MCP server '{}': {e}", kwargs.transport).into(),
+            )
+        })?;
+
+    // Fan out every ready call through a shared semaphore.
+    let outcomes: Vec<(usize, usize, serde_json::Value)> = {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let mut handles = Vec::with_capacity(flat.len());
+
+        for (row_idx, call_idx, spec, prepared) in flat {
+            match prepared {
+                Prepared::Invalid(msg) => {
+                    handles.push(TaskOrReady::Ready((
+                        row_idx,
+                        call_idx,
+                        tool_result_json(&spec, None, true, Some(msg)),
+                    )));
+                }
+                Prepared::Ready(args) => {
+                    let client = client.clone();
+                    let semaphore = semaphore.clone();
+                    handles.push(TaskOrReady::Task(RT.spawn(async move {
+                        let _permit = semaphore.acquire().await.expect("semaphore closed");
+                        let outcome = client.call_tool(&spec.tool_name, &args).await;
+                        (
+                            row_idx,
+                            call_idx,
+                            tool_result_json(&spec, outcome.content, outcome.is_error, outcome.error),
+                        )
+                    })));
+                }
+            }
+        }
+
+        run_async(async move {
+            let mut results = Vec::with_capacity(handles.len());
+            for handle in handles {
+                match handle {
+                    TaskOrReady::Ready(r) => results.push(r),
+                    TaskOrReady::Task(t) => results.push(t.await.expect("tool call task panicked")),
+                }
+            }
+            results
+        })
+    };
+
+    // Reassemble per-row JSON arrays, preserving emission order within rows.
+    let mut per_row: Vec<Option<Vec<(usize, serde_json::Value)>>> = rows
+        .iter()
+        .map(|r| r.as_ref().map(|calls| Vec::with_capacity(calls.len())))
+        .collect();
+    for (row_idx, call_idx, result) in outcomes {
+        if let Some(Some(row)) = per_row.get_mut(row_idx) {
+            row.push((call_idx, result));
+        }
+    }
+
+    let results: Vec<Option<String>> = per_row
+        .into_iter()
+        .enumerate()
+        .map(|(idx, opt_row)| {
+            opt_row.map(|mut row| {
+                row.sort_by_key(|(call_idx, _)| *call_idx);
+                let mut values: Vec<serde_json::Value> =
+                    row.into_iter().map(|(_, v)| v).collect();
+                if let Some(parse_err) = &row_errors[idx] {
+                    values.push(serde_json::json!({
+                        "tool_name": null,
+                        "arguments": null,
+                        "content": null,
+                        "is_error": true,
+                        "_error": parse_err,
+                    }));
+                }
+                serde_json::Value::Array(values).to_string()
+            })
+        })
+        .collect();
+
+    let out = StringChunked::from_iter_options(ca.name().clone(), results.into_iter());
+    Ok(out.into_series())
+}
+
+enum TaskOrReady {
+    Task(tokio::task::JoinHandle<(usize, usize, serde_json::Value)>),
+    Ready((usize, usize, serde_json::Value)),
+}
+
+// ============================================================================
 // Cost Calculation Operations
 // ============================================================================
 

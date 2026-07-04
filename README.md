@@ -16,6 +16,7 @@ Polar Llama is a Python library designed to enhance the efficiency of making par
 - **Structured Outputs**: Define response schemas using Pydantic models for type-safe, validated LLM outputs returned as Polars Structs with direct field access.
 - **Vector Similarity**: Rust-powered similarity metrics (cosine, dot product, Euclidean distance) for high-performance vector operations.
 - **Approximate Nearest Neighbor Search**: HNSW algorithm for fast semantic search and recommendations at scale.
+- **Tool Use / MCP**: Dataframe-native tool calling — LLMs emit tool calls as structured output, and `execute_tool_calls` runs every call of every row in parallel against an MCP server or a Python callable. See [docs/TOOL_USE.md](docs/TOOL_USE.md).
 
 #### Installation
 
@@ -386,6 +387,39 @@ query = query.with_columns(
 
 See `docs/VECTOR_SIMILARITY_AND_ANN.md` for complete documentation and advanced examples.
 
+#### Tool Use and MCP
+
+Polar Llama supports tool calling without hiding an agent loop inside your rows. The loop is unrolled into the dataframe: the LLM *emits* tool calls as structured output, `execute_tool_calls` runs every call of every row concurrently (against an MCP server or any Python callable), and a second inference pass synthesizes the results — every intermediate step is an ordinary column.
+
+```python
+from polar_llama import (
+    mcp_tools, tools_to_response_model, execute_tool_calls,
+    tool_results_to_message, combine_messages, inference_messages, Provider,
+)
+
+tools = mcp_tools("http://localhost:8811/mcp")     # tools/list introspection
+ToolCalls = tools_to_response_model(tools)          # emission schema
+
+df = (
+    df
+    # 1. Emit: the LLM parameterizes N calls per row (structured output)
+    .with_columns(calls=pl.col("meal").llama.inference_async(
+        provider=Provider.OPENAI, model="gpt-4o-mini", response_model=ToolCalls))
+    # 2. Execute: all calls across all rows, in parallel, errors as data
+    .with_columns(results=execute_tool_calls(
+        pl.col("calls"), transport="http://localhost:8811/mcp", tools=tools))
+    # 3. Synthesize: fold results back through a second inference pass
+    .with_columns(answer=inference_messages(
+        combine_messages(
+            pl.col("meal").llama.to_message(role="user"),
+            tool_results_to_message(pl.col("results")),
+        ),
+        provider=Provider.OPENAI, model="gpt-4o-mini"))
+)
+```
+
+See [docs/TOOL_USE.md](docs/TOOL_USE.md) for the full guide and [docs/design/MCP_TOOL_INTEGRATION.md](docs/design/MCP_TOOL_INTEGRATION.md) for the design rationale.
+
 #### Benefits
 
 - **Speed**: Processes multiple queries in parallel, drastically reducing the time required for bulk query handling.
@@ -437,4 +471,5 @@ Polar Llama is released under the MIT license. For more details, see the LICENSE
 - [x] **Multi-Message Support**: Support for multi-message conversations to maintain context.
 - [x] **Multiple Provider Support**: Support for different LLM providers (OpenAI, Anthropic, Gemini, Groq, AWS Bedrock).
 - [x] **Structured Data Outputs**: Add support for structured data outputs using Pydantic models with type validation and Polars Struct returns.
+- [x] **Tool Use / MCP**: Batch-parallel tool-call emission and execution with MCP support (see [docs/TOOL_USE.md](docs/TOOL_USE.md)).
 - [ ] **Streaming Responses**: Support for streaming responses from LLM providers.

@@ -1161,6 +1161,19 @@ def tag_taxonomy(
 
 
 # ============================================================================
+# Tool Use (MCP) — see docs/design/MCP_TOOL_INTEGRATION.md
+# ============================================================================
+
+from polar_llama.tools import (
+    TOOL_RESULT_DTYPE,
+    execute_tool_calls,
+    mcp_tools,
+    tool_results_to_message,
+    tools_to_response_model,
+)
+
+
+# ============================================================================
 # Polars Namespace Accessor
 # ============================================================================
 
@@ -1375,6 +1388,35 @@ class LlamaNamespace:
             List of indices of the k nearest neighbors
         """
         return knn_hnsw(self._expr, reference, k=k)
+
+    def execute_tool_calls(
+        self,
+        *,
+        transport: Optional[str] = None,
+        executor=None,
+        tools=None,
+        concurrency: int = 32,
+        timeout_s: int = 30,
+    ) -> pl.Expr:
+        """
+        Execute a column of emitted tool calls in parallel.
+        See ``polar_llama.execute_tool_calls``.
+        """
+        return execute_tool_calls(
+            self._expr,
+            transport=transport,
+            executor=executor,
+            tools=tools,
+            concurrency=concurrency,
+            timeout_s=timeout_s,
+        )
+
+    def tool_results_to_message(self, *, role: str = "user") -> pl.Expr:
+        """
+        Render a tool-results column as a message for the synthesis turn.
+        See ``polar_llama.tool_results_to_message``.
+        """
+        return tool_results_to_message(self._expr, role=role)
 
 
 # ============================================================================
