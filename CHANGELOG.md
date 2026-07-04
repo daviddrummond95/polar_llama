@@ -44,7 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TLS verification is no longer disabled (`danger_accept_invalid_certs` removed); the shared client uses rustls with the OS certificate store
 - **Bedrock prompt caching** now actually emits a `CachePoint` block on the Converse request when `cache_control` is set (previously the marker was injected but never sent). Bedrock supports only the default ~5-minute cache type.
 - **Prompt-cache grouping**: rows with no cacheable system prefix are no longer lumped into a single serial cache group (they are processed as individual rows).
-- **Windows wheels build again**: the AWS SDK now uses the `ring` rustls provider instead of `aws-lc-rs`, whose `aws-lc-sys` native build fails under MSVC ("C atomics require C11 or later").
+- **Windows wheels build again**: the AWS SDK now uses the modern `ring` rustls provider (`aws-smithy-http-client/rustls-ring`) instead of `aws-lc-rs`, whose `aws-lc-sys` native build fails under MSVC ("C atomics require C11 or later"). This also drops the legacy rustls 0.21 path.
+- Bumped vulnerable transitive crates flagged by `cargo audit` (bytes, quinn-proto, rustls-webpki, time, anyhow, memmap2). The remaining pyo3 < 0.29 advisories are pinned by pyo3-polars 0.26 and are explicitly ignored in CI until the bridge supports pyo3 0.29.
 
 ### Performance
 - `inference_messages` now accepts `List(Struct{role, content})` input natively in Rust, so the default path no longer wraps every call in a Python `map_batches` UDF (keeps queries lazy/streaming)

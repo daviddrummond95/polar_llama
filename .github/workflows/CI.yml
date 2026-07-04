@@ -38,7 +38,11 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Run cargo audit
-        run: cargo audit
+        # RUSTSEC-2026-0176 / -0177 are pyo3 < 0.29 advisories. pyo3 is pinned to
+        # 0.27 by pyo3-polars 0.26 (the PyO3<->Polars bridge), which does not yet
+        # support pyo3 0.29, so these cannot be resolved without a coordinated
+        # pyo3-polars/polars upgrade. Revisit when pyo3-polars supports pyo3 0.29.
+        run: cargo audit --ignore RUSTSEC-2026-0176 --ignore RUSTSEC-2026-0177
 
       - name: Check for Python dependency vulnerabilities
         run: |

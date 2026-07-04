@@ -29,7 +29,9 @@ async-trait = "0.1"
 # The SDK's `rustls` feature = tls-rustls (ring); we drop `default-https-client`
 # (aws-lc). Feature unification gives aws-config the same ring client.
 aws-config = { version = "1", default-features = false, features = ["rt-tokio", "credentials-process", "sso", "behavior-version-latest"] }
-aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["rt-tokio"] }
+# Modern ring client (hyper 1.x): avoids aws-lc-sys AND the legacy rustls 0.21 / webpki 0.101 path.
+aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
 jsonschema = { version = "0.46", default-features = false }
 # Approximate nearest neighbor search using HNSW
 instant-distance = { version = "0.6", features = ["with-serde"] }
