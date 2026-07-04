@@ -24,8 +24,12 @@ polars-core = { version = "0.53", default-features = false }
 futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 async-trait = "0.1"
-aws-config = "1"
-aws-sdk-bedrockruntime = "1"
+# Use the ring crypto provider (not aws-lc-rs) so the Windows wheel builds:
+# aws-lc-sys fails to compile under MSVC ("C atomics require C11 or later").
+# The SDK's `rustls` feature = tls-rustls (ring); we drop `default-https-client`
+# (aws-lc). Feature unification gives aws-config the same ring client.
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "credentials-process", "sso", "behavior-version-latest"] }
+aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["rustls", "rt-tokio"] }
 jsonschema = { version = "0.46", default-features = false }
 # Approximate nearest neighbor search using HNSW
 instant-distance = { version = "0.6", features = ["with-serde"] }
