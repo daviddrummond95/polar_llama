@@ -381,16 +381,19 @@ def inference_async(
         or String (if no response_model)
     """
     expr = parse_into_expr(expr)
-    kwargs = {}
 
-    if provider is not None:
-        # Convert Provider to string to make it picklable
-        if isinstance(provider, Provider):
-            provider = str(provider)
-        kwargs["provider"] = provider
-
-    if model is not None:
-        kwargs["model"] = model
+    # Convert Provider to string to make it picklable. All keys are always
+    # present (None values deserialize to Option::None) because polars
+    # serializes an empty kwargs dict to empty bytes, which the plugin
+    # cannot parse.
+    if provider is not None and isinstance(provider, Provider):
+        provider = str(provider)
+    kwargs = {
+        "provider": provider,
+        "model": model,
+        "response_schema": None,
+        "response_model_name": None,
+    }
 
     # Handle response_format alias
     if response_model is None and response_format is not None:
@@ -481,16 +484,19 @@ def inference(
         stacklevel=2
     )
     expr = parse_into_expr(expr)
-    kwargs = {}
 
-    if provider is not None:
-        # Convert Provider to string to make it picklable
-        if isinstance(provider, Provider):
-            provider = str(provider)
-        kwargs["provider"] = provider
-
-    if model is not None:
-        kwargs["model"] = model
+    # Convert Provider to string to make it picklable. All keys are always
+    # present (None values deserialize to Option::None) because polars
+    # serializes an empty kwargs dict to empty bytes, which the plugin
+    # cannot parse.
+    if provider is not None and isinstance(provider, Provider):
+        provider = str(provider)
+    kwargs = {
+        "provider": provider,
+        "model": model,
+        "response_schema": None,
+        "response_model_name": None,
+    }
 
     # Handle response_format alias
     if response_model is None and response_format is not None:
@@ -597,21 +603,18 @@ def inference_messages(
     # Wrap expr to convert List types to JSON
     expr = expr.map_batches(_convert_list_to_json, return_dtype=pl.Utf8)
 
-    kwargs = {}
-
-    if provider is not None:
-        # Convert Provider to string to make it picklable
-        if hasattr(provider, 'as_str'):
-            provider_str = provider.as_str()
-        elif hasattr(provider, '__str__'):
-            provider_str = str(provider)
-        else:
-            provider_str = provider
-
-        kwargs["provider"] = provider_str
-
-    if model is not None:
-        kwargs["model"] = model
+    # Convert Provider to string to make it picklable. All keys are always
+    # present (None values deserialize to Option::None) because polars
+    # serializes an empty kwargs dict to empty bytes, which the plugin
+    # cannot parse.
+    if provider is not None and not isinstance(provider, str):
+        provider = provider.as_str() if hasattr(provider, "as_str") else str(provider)
+    kwargs = {
+        "provider": provider,
+        "model": model,
+        "response_schema": None,
+        "response_model_name": None,
+    }
 
     # Handle response_format alias
     if response_model is None and response_format is not None:
@@ -636,22 +639,13 @@ def inference_messages(
     else:
         kwargs["cache"] = False
 
-    # Don't pass empty kwargs dictionary
-    if not kwargs:
-        result_expr = register_plugin(
-            args=[expr],
-            symbol="inference_messages",
-            is_elementwise=True,
-            lib=lib,
-        )
-    else:
-        result_expr = register_plugin(
-            args=[expr],
-            symbol="inference_messages",
-            is_elementwise=True,
-            lib=lib,
-            kwargs=kwargs,
-        )
+    result_expr = register_plugin(
+        args=[expr],
+        symbol="inference_messages",
+        is_elementwise=True,
+        lib=lib,
+        kwargs=kwargs,
+    )
 
     # If response_model was provided, convert JSON strings to structs
     if struct_dtype is not None:
@@ -776,32 +770,20 @@ def embedding_async(
     ... ])
     """
     expr = parse_into_expr(expr)
-    kwargs = {}
 
-    if provider is not None:
-        # Convert Provider to string to make it picklable
-        if isinstance(provider, Provider):
-            provider = str(provider)
-        kwargs["provider"] = provider
+    # Convert Provider to string to make it picklable; keep all keys present
+    # so the serialized kwargs are never empty.
+    if provider is not None and isinstance(provider, Provider):
+        provider = str(provider)
+    kwargs = {"provider": provider, "model": model}
 
-    if model is not None:
-        kwargs["model"] = model
-
-    if kwargs:
-        return register_plugin(
-            args=[expr],
-            symbol="embedding_async",
-            is_elementwise=True,
-            lib=lib,
-            kwargs=kwargs,
-        )
-    else:
-        return register_plugin(
-            args=[expr],
-            symbol="embedding_async",
-            is_elementwise=True,
-            lib=lib,
-        )
+    return register_plugin(
+        args=[expr],
+        symbol="embedding_async",
+        is_elementwise=True,
+        lib=lib,
+        kwargs=kwargs,
+    )
 
 
 def cosine_similarity(
@@ -1467,6 +1449,24 @@ def template(format_string: str, *args: IntoExpr, **kwargs: IntoExpr) -> pl.Expr
             # But the recommendation says "Abstract Prompt Templating... ensure the library works consistently".
             pass
         return pl.format(format_string, *args)
+
+# ============================================================================
+# Prompt Optimization (DSPy-style)
+# ============================================================================
+
+# Imported late so optimize.py can lazily import inference helpers from here.
+from polar_llama import optimize  # noqa: E402
+from polar_llama.optimize import (  # noqa: E402
+    BootstrapFewShot,
+    Evaluation,
+    InputField,
+    InstructionOptimizer,
+    OutputField,
+    Predict,
+    Signature,
+    evaluate,
+)
+
 
 def _validate_strict_mode_schema(model: Type['BaseModel']) -> None:
     """

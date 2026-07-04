@@ -3,19 +3,13 @@ use crate::cache::{self, CacheStrategy, CacheConfig};
 use crate::utils::*;
 use crate::model_client::{Provider, Message};
 use crate::cost;
-use once_cell::sync::Lazy;
 use polars::prelude::*;
-use polars_core::prelude::CompatLevel;
 use polars_core::chunked_array::builder::ListPrimitiveChunkedBuilder;
 use pyo3_polars::derive::polars_expr;
 use serde::Deserialize;
 use std::borrow::Cow;
-use tokio::runtime::Runtime;
 use std::str::FromStr;
 use polars::datatypes::DataType;
-
-// Initialize a global runtime for all async operations
-static RT: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create Tokio runtime"));
 
 // Helper function to run async operations in a way that allows true parallelization
 // Instead of directly blocking on async work, we spawn it as a task and then block on the handle
@@ -68,12 +62,27 @@ fn parse_provider(provider_str: &str) -> Option<Provider> {
 /// Get default model for a given provider
 fn get_default_model(provider: Provider) -> &'static str {
     match provider {
-        Provider::OpenAI => "gpt-4-turbo",
-        Provider::Anthropic => "claude-3-opus-20240229",
-        Provider::Gemini => "gemini-1.5-pro",
-        Provider::Groq => "llama3-70b-8192",
-        Provider::Bedrock => "anthropic.claude-3-haiku-20240307-v1:0",
+        Provider::OpenAI => crate::model_client::openai::DEFAULT_OPENAI_MODEL,
+        Provider::Anthropic => crate::model_client::anthropic::DEFAULT_ANTHROPIC_MODEL,
+        Provider::Gemini => crate::model_client::gemini::DEFAULT_GEMINI_MODEL,
+        Provider::Groq => crate::model_client::groq::DEFAULT_GROQ_MODEL,
+        Provider::Bedrock => crate::model_client::bedrock::DEFAULT_BEDROCK_MODEL,
     }
+}
+
+/// Resolve the provider/model pair from kwargs, falling back to OpenAI and
+/// the provider's default model.
+fn resolve_provider_and_model(kwargs: &InferenceKwargs) -> (Provider, String) {
+    let provider = kwargs
+        .provider
+        .as_deref()
+        .and_then(parse_provider)
+        .unwrap_or(Provider::OpenAI);
+    let model = kwargs
+        .model
+        .clone()
+        .unwrap_or_else(|| get_default_model(provider).to_string());
+    (provider, model)
 }
 
 // This polars_expr annotation registers the function with Polars at build time
@@ -81,13 +90,7 @@ fn get_default_model(provider: Provider) -> &'static str {
 fn inference(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
 
-    // Determine provider and model
-    let provider = match &kwargs.provider {
-        Some(provider_str) => parse_provider(provider_str).unwrap_or(Provider::OpenAI),
-        None => Provider::OpenAI,
-    };
-
-    let model = kwargs.model.unwrap_or_else(|| get_default_model(provider).to_string());
+    let (provider, model) = resolve_provider_and_model(&kwargs);
 
     let out = ca.apply(|opt_value| {
         opt_value.map(|value| {
@@ -104,7 +107,7 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
     let input_series = &inputs[0];
 
     // Handle empty series or null dtype - return empty String series
-    if input_series.is_empty() || input_series.dtype() == &polars::datatypes::DataType::Null {
+    if input_series.is_empty() || input_series.dtype() == &DataType::Null {
         return Ok(StringChunked::from_iter_options(
             input_series.name().clone(),
             std::iter::empty::<Option<String>>(),
@@ -196,134 +199,37 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
 
     // Non-caching path: original implementation
     // Collect all messages, keeping track of their original indices
-    let mut messages_with_indices: Vec<(usize, String)> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let mut messages: Vec<String> = Vec::new();
     for (idx, opt_value) in ca.into_iter().enumerate() {
         if let Some(value) = opt_value {
-            messages_with_indices.push((idx, value.to_owned()));
+            indices.push(idx);
+            messages.push(value.to_owned());
         }
     }
 
-    // Extract just the messages for the API calls
-    let messages: Vec<String> = messages_with_indices.iter().map(|(_, msg)| msg.clone()).collect();
+    let (provider, model) = resolve_provider_and_model(&kwargs);
+    let schema = kwargs.response_schema;
+    let model_name = kwargs.response_model_name;
 
-    // Get results based on provider and model
-    let api_results = if kwargs.response_schema.is_some() {
-        // Use structured output with validation
-        // Clone the strings so we can move them into async blocks
-        let schema_owned = kwargs.response_schema.clone();
-        let model_name_owned = kwargs.response_model_name.clone();
-
-        match (&kwargs.provider, &kwargs.model) {
-            (Some(provider_str), Some(model)) => {
-                // Try to parse provider string to Provider enum
-                if let Some(provider) = parse_provider(provider_str) {
-                    let messages_owned = messages.clone();
-                    let model_owned = model.clone();
-                    let schema = schema_owned.clone();
-                    let model_name = model_name_owned.clone();
-                    run_async(async move {
-                        fetch_data_with_provider_and_schema(&messages_owned, provider, &model_owned, schema.as_deref(), model_name.as_deref()).await
-                    })
-                } else {
-                    let messages_owned = messages.clone();
-                    let model_owned = model.clone();
-                    let schema = schema_owned.clone();
-                    let model_name = model_name_owned.clone();
-                    run_async(async move {
-                        fetch_data_with_provider_and_schema(&messages_owned, Provider::OpenAI, &model_owned, schema.as_deref(), model_name.as_deref()).await
-                    })
-                }
-            },
-            (Some(provider_str), None) => {
-                if let Some(provider) = parse_provider(provider_str) {
-                    let default_model = get_default_model(provider);
-                    let messages_owned = messages.clone();
-                    let schema = schema_owned.clone();
-                    let model_name = model_name_owned.clone();
-                    run_async(async move {
-                        fetch_data_with_provider_and_schema(&messages_owned, provider, default_model, schema.as_deref(), model_name.as_deref()).await
-                    })
-                } else {
-                    let default_model = get_default_model(Provider::OpenAI);
-                    let messages_owned = messages.clone();
-                    let schema = schema_owned.clone();
-                    let model_name = model_name_owned.clone();
-                    run_async(async move {
-                        fetch_data_with_provider_and_schema(&messages_owned, Provider::OpenAI, default_model, schema.as_deref(), model_name.as_deref()).await
-                    })
-                }
-            },
-            (None, Some(model)) => {
-                let messages_owned = messages.clone();
-                let model_owned = model.clone();
-                let schema = schema_owned.clone();
-                let model_name = model_name_owned.clone();
-                run_async(async move {
-                    fetch_data_with_provider_and_schema(&messages_owned, Provider::OpenAI, &model_owned, schema.as_deref(), model_name.as_deref()).await
-                })
-            },
-            (None, None) => {
-                let default_model = get_default_model(Provider::OpenAI);
-                let messages_owned = messages.clone();
-                let schema = schema_owned.clone();
-                let model_name = model_name_owned.clone();
-                run_async(async move {
-                    fetch_data_with_provider_and_schema(&messages_owned, Provider::OpenAI, default_model, schema.as_deref(), model_name.as_deref()).await
-                })
-            },
+    let api_results = run_async(async move {
+        if schema.is_some() {
+            fetch_data_with_provider_and_schema(
+                &messages,
+                provider,
+                &model,
+                schema.as_deref(),
+                model_name.as_deref(),
+            ).await
+        } else {
+            fetch_data_with_provider(&messages, provider, &model).await
         }
-    } else {
-        // Use regular inference without structured output
-        match (&kwargs.provider, &kwargs.model) {
-            (Some(provider_str), Some(model)) => {
-                if let Some(provider) = parse_provider(provider_str) {
-                    let messages_owned = messages.clone();
-                    let model_owned = model.clone();
-                    run_async(async move {
-                        fetch_data_with_provider(&messages_owned, provider, &model_owned).await
-                    })
-                } else {
-                    let messages_owned = messages.clone();
-                    let model_owned = model.clone();
-                    run_async(async move {
-                        fetch_data_with_provider(&messages_owned, Provider::OpenAI, &model_owned).await
-                    })
-                }
-            },
-            (Some(provider_str), None) => {
-                if let Some(provider) = parse_provider(provider_str) {
-                    let default_model = get_default_model(provider);
-                    let messages_owned = messages.clone();
-                    run_async(async move {
-                        fetch_data_with_provider(&messages_owned, provider, default_model).await
-                    })
-                } else {
-                    let messages_owned = messages.clone();
-                    run_async(async move {
-                        fetch_data(&messages_owned).await
-                    })
-                }
-            },
-            (None, Some(model)) => {
-                let messages_owned = messages.clone();
-                let model_owned = model.clone();
-                run_async(async move {
-                    fetch_data_with_provider(&messages_owned, Provider::OpenAI, &model_owned).await
-                })
-            },
-            (None, None) => {
-                let messages_owned = messages.clone();
-                run_async(async move {
-                    fetch_data(&messages_owned).await
-                })
-            },
-        }
-    };
+    });
 
     // Map results back to original positions
     let mut results: Vec<Option<String>> = vec![None; ca.len()];
-    for ((idx, _), result) in messages_with_indices.iter().zip(api_results.iter()) {
-        results[*idx] = result.clone();
+    for (idx, result) in indices.into_iter().zip(api_results) {
+        results[idx] = result;
     }
 
     let out = StringChunked::from_iter_options(ca.name().clone(), results.into_iter());
@@ -360,7 +266,7 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
     let input_series = &inputs[0];
 
     // Handle empty series or null dtype - return empty String series
-    if input_series.is_empty() || input_series.dtype() == &polars::datatypes::DataType::Null {
+    if input_series.is_empty() || input_series.dtype() == &DataType::Null {
         return Ok(StringChunked::from_iter_options(
             input_series.name().clone(),
             std::iter::empty::<Option<String>>(),
@@ -393,23 +299,17 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
         }
         other => {
             return Err(polars::prelude::PolarsError::InvalidOperation(
-                format!("inference_messages expects String or List(Struct) input, got {:?}", other).into()
+                format!("inference_messages expects String or List(Struct) input, got {other:?}").into()
             ));
         }
     }
 
-    // Extract just the message arrays for the API calls
-    let message_arrays: Vec<Vec<Message>> = arrays_with_indices.iter().map(|(_, arr)| arr.clone()).collect();
+    let (provider, model) = resolve_provider_and_model(&kwargs);
+    let schema = kwargs.response_schema.clone();
+    let model_name = kwargs.response_model_name.clone();
 
-    // Determine provider and model
-    let provider = kwargs.provider
-        .as_ref()
-        .and_then(|s| parse_provider(s))
-        .unwrap_or(Provider::OpenAI);
-
-    let model = kwargs.model
-        .clone()
-        .unwrap_or_else(|| get_default_model(provider).to_string());
+    let message_arrays: Vec<Vec<Message>> =
+        arrays_with_indices.iter().map(|(_, arr)| arr.clone()).collect();
 
     // Check if caching is enabled
     let cache_enabled = kwargs.cache.unwrap_or(false);
@@ -435,23 +335,19 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
             cache_config.min_tokens,
         );
 
-        // Process with cache optimization
-        let schema_owned = kwargs.response_schema.clone();
-        let model_name_owned = kwargs.response_model_name.clone();
-
         process_with_cache_groups(
             message_arrays,
             cache_groups,
             provider,
             &model,
             &cache_config,
-            schema_owned.as_deref(),
-            model_name_owned.as_deref(),
+            schema.as_deref(),
+            model_name.as_deref(),
         )
-    } else if kwargs.response_schema.is_some() {
+    } else if schema.is_some() {
         // Use structured output with validation (non-cached)
-        let schema_owned = kwargs.response_schema.clone();
-        let model_name_owned = kwargs.response_model_name.clone();
+        let schema_owned = schema.clone();
+        let model_name_owned = model_name.clone();
         let arrays_owned = message_arrays.clone();
         let model_owned = model.clone();
 
@@ -566,10 +462,14 @@ fn combine_messages(inputs: &[Series]) -> PolarsResult<Series> {
         ));
     }
 
-    // Get the first input to determine length and name
-    let first_ca = inputs[0].str()?;
-    let name = first_ca.name().clone();
-    let len = first_ca.len();
+    // Cast all inputs to string columns once, instead of once per row
+    let columns: Vec<&StringChunked> = inputs
+        .iter()
+        .map(|s| s.str())
+        .collect::<PolarsResult<Vec<_>>>()?;
+
+    let name = columns[0].name().clone();
+    let len = columns[0].len();
 
     // Create a vector to store the results for each row
     let mut result_values = Vec::with_capacity(len);
@@ -580,28 +480,27 @@ fn combine_messages(inputs: &[Series]) -> PolarsResult<Series> {
         let mut first = true;
 
         // Process each input column for this row
-        for input in inputs {
-            let ca = input.str()?;
+        for ca in &columns {
             if let Some(msg_str) = ca.get(i) {
                 // Skip empty messages
                 if msg_str.is_empty() {
                     continue;
                 }
-                
+
                 // Add comma if not the first message
                 if !first {
                     combined_messages.push(',');
                 }
-                
+
                 // Determine if this is a single message or an array of messages
-                if msg_str.starts_with("[") && msg_str.ends_with("]") {
+                if msg_str.starts_with('[') && msg_str.ends_with(']') {
                     // This is already an array, so remove the brackets
                     let inner = &msg_str[1..msg_str.len() - 1];
                     if !inner.is_empty() {
                         combined_messages.push_str(inner);
                         first = false;
                     }
-                } else if msg_str.starts_with("{") && msg_str.ends_with("}") {
+                } else if msg_str.starts_with('{') && msg_str.ends_with('}') {
                     // This is a single message, just append it
                     combined_messages.push_str(msg_str);
                     first = false;
@@ -616,9 +515,10 @@ fn combine_messages(inputs: &[Series]) -> PolarsResult<Series> {
                         },
                         Err(_) => {
                             // It's not valid JSON, wrap it as a user message
+                            let escaped = serde_json::to_string(msg_str)
+                                .unwrap_or_else(|_| "\"\"".to_string());
                             combined_messages.push_str(&format!(
-                                "{{\"role\": \"user\", \"content\": \"{}\"}}",
-                                msg_str.replace("\"", "\\\"")
+                                "{{\"role\": \"user\", \"content\": {escaped}}}"
                             ));
                             first = false;
                         }
@@ -626,10 +526,10 @@ fn combine_messages(inputs: &[Series]) -> PolarsResult<Series> {
                 }
             }
         }
-        
+
         // Close the array
         combined_messages.push(']');
-        
+
         // Add to results
         result_values.push(Some(combined_messages));
     }
@@ -681,15 +581,14 @@ fn embedding_async(inputs: &[Series], kwargs: EmbeddingKwargs) -> PolarsResult<S
     let ca: &StringChunked = input_series.str()?;
 
     // Collect all texts, keeping track of their original indices
-    let mut texts_with_indices: Vec<(usize, String)> = Vec::new();
+    let mut indices: Vec<usize> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
     for (idx, opt_value) in ca.into_iter().enumerate() {
         if let Some(value) = opt_value {
-            texts_with_indices.push((idx, value.to_owned()));
+            indices.push(idx);
+            texts.push(value.to_owned());
         }
     }
-
-    // Extract just the texts for the API calls
-    let texts: Vec<String> = texts_with_indices.iter().map(|(_, text)| text.clone()).collect();
 
     // Determine provider and model
     let provider = match &kwargs.provider {
@@ -702,17 +601,14 @@ fn embedding_async(inputs: &[Series], kwargs: EmbeddingKwargs) -> PolarsResult<S
         .unwrap_or_else(|| get_default_embedding_model(provider).to_string());
 
     // Fetch embeddings in parallel using spawn for true parallelization
-    // Clone data for 'static lifetime requirement of spawn
-    let texts_owned = texts.clone();
-    let model_owned = model.clone();
     let api_results = run_async(async move {
-        fetch_embeddings_with_provider(&texts_owned, provider, &model_owned).await
+        fetch_embeddings_with_provider(&texts, provider, &model).await
     });
 
     // Map results back to original positions
     let mut results: Vec<Option<Vec<f64>>> = vec![None; ca.len()];
-    for ((idx, _), result) in texts_with_indices.iter().zip(api_results.iter()) {
-        results[*idx] = result.clone();
+    for (idx, result) in indices.into_iter().zip(api_results) {
+        results[idx] = result;
     }
 
     // Convert Vec<Option<Vec<f64>>> to a Series with List<Float64> dtype
@@ -746,9 +642,19 @@ fn embedding_output_type(_input_fields: &[Field]) -> PolarsResult<Field> {
 // Vector Similarity Operations
 // ============================================================================
 
-/// Calculate cosine similarity between two embedding vectors
-#[polars_expr(output_type=Float64)]
-fn cosine_similarity(inputs: &[Series]) -> PolarsResult<Series> {
+/// Apply a binary metric over two List[Float64] columns element-wise.
+///
+/// Uses the contiguous-slice fast path when both vectors have no nulls
+/// (the common case for embeddings), falling back to a null-skipping
+/// element-wise iteration otherwise.
+fn binary_embedding_metric<F>(
+    inputs: &[Series],
+    metric_name: &str,
+    compute: F,
+) -> PolarsResult<Series>
+where
+    F: Fn(&[f64], &[f64]) -> f64,
+{
     let vec1 = inputs[0].list()?;
     let vec2 = inputs[1].list()?;
 
@@ -763,29 +669,24 @@ fn cosine_similarity(inputs: &[Series]) -> PolarsResult<Series> {
 
                     if arr1.len() != arr2.len() {
                         return Err(PolarsError::ComputeError(
-                            "Vectors must have the same length for cosine similarity".into()
+                            format!("Vectors must have the same length for {metric_name}").into()
                         ));
                     }
 
-                    let mut dot_product = 0.0;
-                    let mut norm1 = 0.0;
-                    let mut norm2 = 0.0;
-
-                    for i in 0..arr1.len() {
-                        if let (Some(a), Some(b)) = (arr1.get(i), arr2.get(i)) {
-                            dot_product += a * b;
-                            norm1 += a * a;
-                            norm2 += b * b;
+                    match (arr1.cont_slice(), arr2.cont_slice()) {
+                        (Ok(s1), Ok(s2)) => Ok(Some(compute(s1, s2))),
+                        _ => {
+                            // Null-aware fallback: skip positions where either side is null
+                            let mut s1 = Vec::with_capacity(arr1.len());
+                            let mut s2 = Vec::with_capacity(arr2.len());
+                            for (a, b) in arr1.iter().zip(arr2.iter()) {
+                                if let (Some(a), Some(b)) = (a, b) {
+                                    s1.push(a);
+                                    s2.push(b);
+                                }
+                            }
+                            Ok(Some(compute(&s1, &s2)))
                         }
-                    }
-
-                    norm1 = norm1.sqrt();
-                    norm2 = norm2.sqrt();
-
-                    if norm1 == 0.0 || norm2 == 0.0 {
-                        Ok(Some(0.0))
-                    } else {
-                        Ok(Some(dot_product / (norm1 * norm2)))
                     }
                 },
                 _ => Ok(None),
@@ -794,85 +695,51 @@ fn cosine_similarity(inputs: &[Series]) -> PolarsResult<Series> {
         .collect::<PolarsResult<Float64Chunked>>()?;
 
     Ok(out.into_series())
+}
+
+/// Calculate cosine similarity between two embedding vectors
+#[polars_expr(output_type=Float64)]
+fn cosine_similarity(inputs: &[Series]) -> PolarsResult<Series> {
+    binary_embedding_metric(inputs, "cosine similarity", |s1, s2| {
+        let mut dot_product = 0.0;
+        let mut norm1 = 0.0;
+        let mut norm2 = 0.0;
+        for (a, b) in s1.iter().zip(s2.iter()) {
+            dot_product += a * b;
+            norm1 += a * a;
+            norm2 += b * b;
+        }
+        norm1 = norm1.sqrt();
+        norm2 = norm2.sqrt();
+        if norm1 == 0.0 || norm2 == 0.0 {
+            0.0
+        } else {
+            dot_product / (norm1 * norm2)
+        }
+    })
 }
 
 /// Calculate dot product between two embedding vectors
 #[polars_expr(output_type=Float64)]
 fn dot_product(inputs: &[Series]) -> PolarsResult<Series> {
-    let vec1 = inputs[0].list()?;
-    let vec2 = inputs[1].list()?;
-
-    let out: Float64Chunked = vec1
-        .amortized_iter()
-        .zip(vec2.amortized_iter())
-        .map(|(opt_v1, opt_v2)| {
-            match (opt_v1, opt_v2) {
-                (Some(v1), Some(v2)) => {
-                    let arr1 = v1.as_ref().f64()?;
-                    let arr2 = v2.as_ref().f64()?;
-
-                    if arr1.len() != arr2.len() {
-                        return Err(PolarsError::ComputeError(
-                            "Vectors must have the same length for dot product".into()
-                        ));
-                    }
-
-                    let mut result = 0.0;
-
-                    for i in 0..arr1.len() {
-                        if let (Some(a), Some(b)) = (arr1.get(i), arr2.get(i)) {
-                            result += a * b;
-                        }
-                    }
-
-                    Ok(Some(result))
-                },
-                _ => Ok(None),
-            }
-        })
-        .collect::<PolarsResult<Float64Chunked>>()?;
-
-    Ok(out.into_series())
+    binary_embedding_metric(inputs, "dot product", |s1, s2| {
+        s1.iter().zip(s2.iter()).map(|(a, b)| a * b).sum()
+    })
 }
 
 /// Calculate Euclidean distance between two embedding vectors
 #[polars_expr(output_type=Float64)]
 fn euclidean_distance(inputs: &[Series]) -> PolarsResult<Series> {
-    let vec1 = inputs[0].list()?;
-    let vec2 = inputs[1].list()?;
-
-    let out: Float64Chunked = vec1
-        .amortized_iter()
-        .zip(vec2.amortized_iter())
-        .map(|(opt_v1, opt_v2)| {
-            match (opt_v1, opt_v2) {
-                (Some(v1), Some(v2)) => {
-                    let arr1 = v1.as_ref().f64()?;
-                    let arr2 = v2.as_ref().f64()?;
-
-                    if arr1.len() != arr2.len() {
-                        return Err(PolarsError::ComputeError(
-                            "Vectors must have the same length for Euclidean distance".into()
-                        ));
-                    }
-
-                    let mut sum_squared_diff = 0.0;
-
-                    for i in 0..arr1.len() {
-                        if let (Some(a), Some(b)) = (arr1.get(i), arr2.get(i)) {
-                            let diff = a - b;
-                            sum_squared_diff += diff * diff;
-                        }
-                    }
-
-                    Ok(Some(sum_squared_diff.sqrt()))
-                },
-                _ => Ok(None),
-            }
-        })
-        .collect::<PolarsResult<Float64Chunked>>()?;
-
-    Ok(out.into_series())
+    binary_embedding_metric(inputs, "Euclidean distance", |s1, s2| {
+        s1.iter()
+            .zip(s2.iter())
+            .map(|(a, b)| {
+                let diff = a - b;
+                diff * diff
+            })
+            .sum::<f64>()
+            .sqrt()
+    })
 }
 
 // ============================================================================
@@ -925,11 +792,11 @@ fn knn_hnsw(inputs: &[Series], kwargs: KnnKwargs) -> PolarsResult<Series> {
     let index = crate::ann::build_hnsw_index(ref_vecs);
 
     // Search for k-nearest neighbors for each query
-    let mut builder = polars_core::chunked_array::builder::ListPrimitiveChunkedBuilder::<polars_core::datatypes::Int64Type>::new(
+    let mut builder = ListPrimitiveChunkedBuilder::<Int64Type>::new(
         query_embeddings.name().clone(),
         query_embeddings.len(),
-        k * 2, // indices + distances
-        polars::datatypes::DataType::Int64,
+        k,
+        DataType::Int64,
     );
 
     for i in 0..query_embeddings.len() {
@@ -1265,7 +1132,7 @@ fn default_token_model() -> String {
 /// Count the number of tokens in each text string.
 ///
 /// Uses tiktoken tokenizers:
-/// - o200k_base for GPT-4o and o1 models
+/// - o200k_base for GPT-4o, GPT-4.1, GPT-5, and o-series models
 /// - cl100k_base for all other models (GPT-4, GPT-3.5, Claude, Llama, etc.)
 ///
 /// # Arguments
@@ -1277,11 +1144,14 @@ fn default_token_model() -> String {
 #[polars_expr(output_type=UInt64)]
 fn count_tokens(inputs: &[Series], kwargs: TokenCountKwargs) -> PolarsResult<Series> {
     let ca: &StringChunked = inputs[0].str()?;
-    let model = &kwargs.model;
+    // Resolve the tokenizer once per batch instead of once per row
+    let tokenizer_type = cost::get_tokenizer_type(&kwargs.model);
 
     let out: UInt64Chunked = ca
         .into_iter()
-        .map(|opt_value| opt_value.map(|value| cost::count_tokens(value, model) as u64))
+        .map(|opt_value| {
+            opt_value.map(|value| cost::count_tokens_with_tokenizer(value, tokenizer_type) as u64)
+        })
         .collect();
 
     Ok(out.into_series())
@@ -1302,7 +1172,7 @@ fn default_cost_provider() -> String {
 }
 
 fn default_cost_model() -> String {
-    "gpt-4-turbo".to_string()
+    "gpt-4o".to_string()
 }
 
 /// Calculate the input cost in USD for each text string based on token count.
@@ -1313,8 +1183,8 @@ fn default_cost_model() -> String {
 /// # Arguments
 /// * `provider` - The provider name: "openai", "anthropic", "gemini", "groq", or "bedrock".
 ///                Defaults to "openai".
-/// * `model` - The model name for pricing lookup (e.g., "gpt-4o", "claude-3-opus-20240229").
-///             Defaults to "gpt-4-turbo".
+/// * `model` - The model name for pricing lookup (e.g., "gpt-4o", "claude-opus-4-8").
+///             Defaults to "gpt-4o".
 ///
 /// # Returns
 /// A Float64 series with input costs in USD for each row.
@@ -1340,15 +1210,16 @@ fn calculate_input_cost(inputs: &[Series], kwargs: CostKwargs) -> PolarsResult<S
     // Parse provider
     let provider = parse_provider(provider_str).unwrap_or(Provider::OpenAI);
 
-    // Get pricing for this provider/model combination
+    // Resolve pricing and tokenizer once per batch
     let pricing = cost::get_pricing(provider, model);
+    let tokenizer_type = cost::get_tokenizer_type(model);
 
     let out: Float64Chunked = ca
         .into_iter()
         .map(|opt_value| {
             opt_value.and_then(|value| {
                 pricing.map(|p| {
-                    let token_count = cost::count_tokens(value, model);
+                    let token_count = cost::count_tokens_with_tokenizer(value, tokenizer_type);
                     p.calculate_input_cost(token_count)
                 })
             })

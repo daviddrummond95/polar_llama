@@ -63,19 +63,14 @@ fn register_expressions(_py: Python<'_>) -> PyResult<&'static str> {
 }
 
 #[pymodule]
-fn polar_llama(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn polar_llama(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.setattr("__version__", env!("CARGO_PKG_VERSION"))?;
-    
+
     // Add the PyProvider class to the module
     m.add_class::<PyProvider>()?;
-    
+
     // Add the register_expressions function to the module
     m.add_function(wrap_pyfunction!(register_expressions, m)?)?;
-    
-    // Display a message in Python's stdout when the module is loaded
-    py.import("builtins")?.getattr("print")?.call1((
-        "polar_llama module loaded successfully. Polars expressions should be available.",
-    ))?;
-    
+
     Ok(())
 }

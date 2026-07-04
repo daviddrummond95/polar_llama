@@ -4,15 +4,15 @@ use super::{ModelClient, ModelClientError, Message, Provider, EmbeddingClient};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
 
+/// Default OpenAI chat model
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
+
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct OpenAICompletion {
     id: String,
-    object: String,
-    created: i64,
     model: String,
     choices: Vec<OpenAIChoice>,
-    usage: OpenAIUsage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -20,22 +20,14 @@ struct OpenAICompletion {
 struct OpenAIChoice {
     index: i32,
     message: OpenAIMessage,
-    finish_reason: String,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct OpenAIMessage {
     role: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct OpenAIUsage {
-    prompt_tokens: i32,
-    completion_tokens: i32,
-    total_tokens: i32,
+    content: Option<String>,
 }
 
 pub struct OpenAIClient {
@@ -43,30 +35,16 @@ pub struct OpenAIClient {
 }
 
 impl OpenAIClient {
-    // Kept for backward compatibility but marked as deprecated
-    #[deprecated(since = "0.2.0", note = "Use new_with_model instead")]
-    pub fn new() -> Self {
-        Self {
-            model: "gpt-4-turbo".to_string(),
-        }
-    }
-    
     pub fn new_with_model(model: &str) -> Self {
         Self {
             model: model.to_string(),
         }
     }
-    
-    // Renamed to new_with_model, kept for backwards compatibility
-    #[deprecated(since = "0.2.0", note = "Use new_with_model instead")]
-    pub fn with_model(model: &str) -> Self {
-        Self::new_with_model(model)
-    }
 }
 
 impl Default for OpenAIClient {
     fn default() -> Self {
-        Self::new_with_model("gpt-4o-mini")
+        Self::new_with_model(DEFAULT_OPENAI_MODEL)
     }
 }
 
@@ -75,15 +53,17 @@ impl ModelClient for OpenAIClient {
     fn provider(&self) -> Provider {
         Provider::OpenAI
     }
-    
+
     fn api_endpoint(&self) -> String {
-        "https://api.openai.com/v1/chat/completions".to_string()
+        let base = std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com".to_string());
+        format!("{}/v1/chat/completions", base.trim_end_matches('/'))
     }
-    
+
     fn model_name(&self) -> &str {
         &self.model
     }
-    
+
     fn format_messages(&self, messages: &[Message]) -> Value {
         // OpenAI supports standard system, user, and assistant roles
         let formatted_messages = messages.iter().map(|msg| {
@@ -91,27 +71,27 @@ impl ModelClient for OpenAIClient {
                 "system" => "system",
                 "user" => "user",
                 "assistant" => "assistant",
-                "function" => "function", // Support function role for function calling
+                "tool" => "tool",
                 // Default unknown roles to user
                 _ => "user",
             };
-            
+
             json!({
                 "role": role,
                 "content": msg.content
             })
         }).collect::<Vec<_>>();
-        
+
         json!(formatted_messages)
     }
-    
+
     fn format_request_body(&self, messages: &[Message], schema: Option<&str>, model_name: Option<&str>) -> Value {
-        // Default OpenAI request parameters
+        // Note: no hardcoded temperature/max_tokens — newer OpenAI models
+        // (o-series, gpt-5 family) reject those parameters, so we rely on
+        // provider defaults for maximum compatibility.
         let mut body = json!({
             "model": self.model_name(),
             "messages": self.format_messages(messages),
-            "temperature": 0.7,
-            "max_tokens": 1024
         });
 
         // Add structured output support if schema is provided
@@ -132,39 +112,13 @@ impl ModelClient for OpenAIClient {
     }
 
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {
-        match serde_json::from_str::<OpenAICompletion>(response_text) {
-            Ok(completion) => {
-                if let Some(choice) = completion.choices.first() {
-                    Ok(choice.message.content.clone())
-                } else {
-                    Err(ModelClientError::ParseError("No response content".to_string()))
-                }
-            },
-            Err(err) => {
-                Err(ModelClientError::Serialization(err))
-            }
-        }
-    }
-
-    async fn send_request(&self, client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
-        let api_key = self.get_api_key();
-        let body = serde_json::to_string(&self.format_request_body(messages, None, None))?;
-
-        let response = client.post(self.api_endpoint())
-            .bearer_auth(api_key)
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let text = response.text().await?;
-
-        if status.is_success() {
-            self.parse_response(&text)
-        } else {
-            Err(ModelClientError::Http(status.as_u16(), text))
-        }
+        let completion: OpenAICompletion = serde_json::from_str(response_text)?;
+        completion
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|choice| choice.message.content)
+            .ok_or_else(|| ModelClientError::ParseError("No response content".to_string()))
     }
 }
 
@@ -173,11 +127,10 @@ impl ModelClient for OpenAIClient {
 // ============================================================================
 
 #[derive(Debug, Serialize)]
-struct OpenAIEmbeddingRequest {
-    input: Vec<String>,
-    model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    encoding_format: Option<String>,
+struct OpenAIEmbeddingRequest<'a> {
+    input: &'a [String],
+    model: &'a str,
+    encoding_format: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,7 +139,6 @@ struct OpenAIEmbeddingResponse {
     object: String,
     data: Vec<OpenAIEmbeddingData>,
     model: String,
-    usage: OpenAIEmbeddingUsage,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,13 +149,6 @@ struct OpenAIEmbeddingData {
     embedding: Vec<f64>,
 }
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct OpenAIEmbeddingUsage {
-    prompt_tokens: i32,
-    total_tokens: i32,
-}
-
 pub struct OpenAIEmbeddingClient {
     model: String,
     dimensions: usize,
@@ -211,10 +156,7 @@ pub struct OpenAIEmbeddingClient {
 
 impl OpenAIEmbeddingClient {
     pub fn new() -> Self {
-        Self {
-            model: "text-embedding-3-small".to_string(),
-            dimensions: 1536,
-        }
+        Self::new_with_model("text-embedding-3-small")
     }
 
     pub fn new_with_model(model: &str) -> Self {
@@ -265,18 +207,15 @@ impl EmbeddingClient for OpenAIEmbeddingClient {
         let api_key = self.get_api_key();
 
         let request_body = OpenAIEmbeddingRequest {
-            input: texts.to_vec(),
-            model: self.model.clone(),
-            encoding_format: Some("float".to_string()),
+            input: texts,
+            model: &self.model,
+            encoding_format: "float",
         };
-
-        let body = serde_json::to_string(&request_body)?;
 
         let response = client
             .post(self.embedding_endpoint())
             .bearer_auth(api_key)
-            .header("Content-Type", "application/json")
-            .body(body)
+            .json(&request_body)
             .send()
             .await?;
 
@@ -296,4 +235,4 @@ impl EmbeddingClient for OpenAIEmbeddingClient {
             Err(ModelClientError::Http(status.as_u16(), text))
         }
     }
-} 
+}

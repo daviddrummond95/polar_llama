@@ -28,10 +28,10 @@ fn is_provider_configured(provider: Provider) -> bool {
 fn get_configured_providers() -> Vec<(Provider, &'static str)> {
     let providers = vec![
         (Provider::OpenAI, "gpt-4o-mini"),
-        (Provider::Anthropic, "claude-3-haiku-20240307"),
-        (Provider::Gemini, "gemini-1.5-flash"),
+        (Provider::Anthropic, "claude-haiku-4-5"),
+        (Provider::Gemini, "gemini-2.5-flash"),
         (Provider::Groq, "llama-3.1-8b-instant"),
-        (Provider::Bedrock, "anthropic.claude-3-haiku-20240307-v1:0"),
+        (Provider::Bedrock, "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
     ];
 
     providers

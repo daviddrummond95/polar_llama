@@ -7,11 +7,38 @@ pub mod bedrock;
 use reqwest::Client;
 use std::error::Error;
 use std::fmt;
+use std::sync::LazyLock;
+use std::time::Duration;
 use serde_json::Value;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
-use futures;
+use futures::StreamExt;
+
+/// Shared HTTP client reused across all requests so connections are pooled
+/// instead of being re-established for every batch.
+static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
+        .timeout(Duration::from_secs(600))
+        .connect_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+});
+
+/// Access the shared HTTP client.
+pub fn http_client() -> &'static Client {
+    &HTTP_CLIENT
+}
+
+/// Maximum number of concurrent in-flight requests per batch.
+/// Override with the POLAR_LLAMA_MAX_CONCURRENCY environment variable.
+fn max_concurrency() -> usize {
+    std::env::var("POLAR_LLAMA_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(64)
+}
 
 use crate::cache::CacheControl;
 
@@ -117,26 +144,15 @@ pub trait ModelClient {
     /// Parse the API response to extract the completion text
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError>;
 
+    /// Attach provider-specific authentication to a request.
+    /// Default: OpenAI-style Bearer token.
+    fn apply_auth(&self, request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+        request.bearer_auth(api_key)
+    }
+
     /// Send a request to the API
     async fn send_request(&self, client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
-        let api_key = self.get_api_key();
-        let body = serde_json::to_string(&self.format_request_body(messages, None, None))?;
-
-        let response = client.post(self.api_endpoint())
-            .bearer_auth(api_key)
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let text = response.text().await?;
-
-        if status.is_success() {
-            self.parse_response(&text)
-        } else {
-            Err(ModelClientError::Http(status.as_u16(), text))
-        }
+        self.send_request_structured(client, messages, None, None).await
     }
 
     /// Send a request with structured output support
@@ -148,12 +164,11 @@ pub trait ModelClient {
         model_name: Option<&str>
     ) -> Result<String, ModelClientError> {
         let api_key = self.get_api_key();
-        let body = serde_json::to_string(&self.format_request_body(messages, schema, model_name))?;
+        let body = self.format_request_body(messages, schema, model_name);
 
-        let response = client.post(self.api_endpoint())
-            .bearer_auth(api_key)
-            .header("Content-Type", "application/json")
-            .body(body)
+        let response = self
+            .apply_auth(client.post(self.api_endpoint()), &api_key)
+            .json(&body)
             .send()
             .await?;
 
@@ -191,8 +206,7 @@ pub trait ModelClient {
                         });
                     },
                     Provider::Anthropic => {
-                        // Anthropic uses a different approach - we'll handle this in the client implementation
-                        // For now, we'll add it as a tool
+                        // Anthropic uses forced tool use for structured outputs
                         body["tools"] = serde_json::json!([{
                             "name": model_name.unwrap_or("response"),
                             "description": "Extract structured data according to the schema",
@@ -264,36 +278,57 @@ pub trait EmbeddingClient {
     }
 }
 
-/// Validate JSON response against a JSON schema
-pub fn validate_json_schema(response: &str, schema_str: &str) -> Result<(), String> {
-    // Parse the response as JSON
-    let response_value: Value = serde_json::from_str(response)
-        .map_err(|e| format!("Failed to parse response as JSON: {}", e))?;
+/// A JSON schema compiled once per batch, instead of once per row.
+enum SchemaCheck {
+    None,
+    Valid(jsonschema::Validator),
+    Invalid(String),
+}
 
-    // Parse the schema
-    let schema: Value = serde_json::from_str(schema_str)
-        .map_err(|e| format!("Failed to parse schema: {}", e))?;
+impl SchemaCheck {
+    fn compile(schema: Option<&str>) -> Self {
+        match schema {
+            None => SchemaCheck::None,
+            Some(schema_str) => {
+                let schema_value: Value = match serde_json::from_str(schema_str) {
+                    Ok(v) => v,
+                    Err(e) => return SchemaCheck::Invalid(format!("Failed to parse schema: {e}")),
+                };
+                match jsonschema::validator_for(&schema_value) {
+                    Ok(validator) => SchemaCheck::Valid(validator),
+                    Err(e) => SchemaCheck::Invalid(format!("Failed to compile schema: {e}")),
+                }
+            }
+        }
+    }
 
-    // Compile the schema
-    let compiled_schema = jsonschema::validator_for(&schema)
-        .map_err(|e| format!("Failed to compile schema: {}", e))?;
+    /// Validate a response against the compiled schema.
+    fn validate(&self, response: &str) -> Result<(), String> {
+        let validator = match self {
+            SchemaCheck::None => return Ok(()),
+            SchemaCheck::Invalid(err) => return Err(err.clone()),
+            SchemaCheck::Valid(v) => v,
+        };
 
-    // Validate the response
-    if compiled_schema.is_valid(&response_value) {
-        Ok(())
-    } else {
-        // Collect validation errors with details
-        let errors: Vec<String> = compiled_schema
+        let response_value: Value = serde_json::from_str(response)
+            .map_err(|e| format!("Failed to parse response as JSON: {e}"))?;
+
+        let errors: Vec<String> = validator
             .iter_errors(&response_value)
             .map(|e| format!("{} at {}", e, e.instance_path()))
             .collect();
 
         if errors.is_empty() {
-            Err("Response does not match the provided schema".to_string())
+            Ok(())
         } else {
             Err(format!("Schema validation failed: {}", errors.join("; ")))
         }
     }
+}
+
+/// Validate JSON response against a JSON schema
+pub fn validate_json_schema(response: &str, schema_str: &str) -> Result<(), String> {
+    SchemaCheck::compile(Some(schema_str)).validate(response)
 }
 
 /// Create an error response object
@@ -324,37 +359,83 @@ pub fn create_client(provider: Provider, model: &str) -> Box<dyn ModelClient + S
     }
 }
 
+/// Core batch runner: sends all requests concurrently (bounded by
+/// `max_concurrency`) over the shared HTTP client, preserving input order.
+///
+/// When `errors_as_json` is true, request errors are surfaced as structured
+/// error JSON objects; otherwise they map to `None`.
+async fn run_one<T: ModelClient + Sync + ?Sized>(
+    client: &T,
+    messages: &[Message],
+    schema: Option<&str>,
+    model_name: Option<&str>,
+    schema_check: &SchemaCheck,
+    errors_as_json: bool,
+) -> Option<String> {
+    match client.send_request_structured(http_client(), messages, schema, model_name).await {
+        Ok(response) => {
+            match schema_check.validate(&response) {
+                Ok(()) => Some(response),
+                Err(validation_error) => Some(create_error_response(
+                    "validation_failed",
+                    &validation_error,
+                    Some(&response),
+                )),
+            }
+        },
+        Err(e) => {
+            eprintln!("Error fetching from {}: {}", client.provider_name(), e);
+            if errors_as_json {
+                Some(create_error_response("api_error", &e.to_string(), None))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+async fn run_batch<T: ModelClient + Sync + ?Sized>(
+    client: &T,
+    message_arrays: &[Vec<Message>],
+    schema: Option<&str>,
+    model_name: Option<&str>,
+    errors_as_json: bool,
+) -> Vec<Option<String>> {
+    let schema_check = SchemaCheck::compile(schema);
+
+    // Collect the futures eagerly so the stream holds concrete future values;
+    // requests still only run when polled, bounded by `buffered`.
+    let requests: Vec<_> = message_arrays
+        .iter()
+        .map(|messages| run_one(client, messages, schema, model_name, &schema_check, errors_as_json))
+        .collect();
+
+    futures::stream::iter(requests)
+        .buffered(max_concurrency())
+        .collect()
+        .await
+}
+
+fn to_user_message_arrays(messages: &[String]) -> Vec<Vec<Message>> {
+    messages
+        .iter()
+        .map(|content| {
+            vec![Message {
+                role: "user".to_string(),
+                content: content.clone(),
+                cache_control: None,
+            }]
+        })
+        .collect()
+}
+
 /// The main function to fetch data from model providers
 pub async fn fetch_data_generic<T: ModelClient + Sync + ?Sized>(
     client: &T,
     messages: &[String]
 ) -> Vec<Option<String>> {
-    let reqwest_client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_else(|_| Client::new());
-
-    let fetch_tasks = messages.iter().map(|content| {
-        let formatted_message = Message {
-            role: "user".to_string(),
-            content: content.clone(),
-            cache_control: None,
-        };
-        let messages = vec![formatted_message];
-        let reqwest_client = &reqwest_client;
-
-        async move {
-            match client.send_request(reqwest_client, &messages).await {
-                Ok(response) => Some(response),
-                Err(e) => {
-                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
-                    None
-                }
-            }
-        }
-    }).collect::<Vec<_>>();
-
-    futures::future::join_all(fetch_tasks).await
+    let message_arrays = to_user_message_arrays(messages);
+    run_batch(client, &message_arrays, None, None, false).await
 }
 
 /// Fetch data with structured output support and validation
@@ -364,51 +445,8 @@ pub async fn fetch_data_generic_with_schema<T: ModelClient + Sync + ?Sized>(
     schema: Option<&str>,
     model_name: Option<&str>
 ) -> Vec<Option<String>> {
-    let reqwest_client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_else(|_| Client::new());
-
-    let fetch_tasks = messages.iter().map(|content| {
-        let formatted_message = Message {
-            role: "user".to_string(),
-            content: content.clone(),
-            cache_control: None,
-        };
-        let messages = vec![formatted_message];
-        let reqwest_client = &reqwest_client;
-        let schema_owned = schema.map(|s| s.to_string());
-        let model_name_owned = model_name.map(|s| s.to_string());
-
-        async move {
-            match client.send_request_structured(
-                reqwest_client,
-                &messages,
-                schema_owned.as_deref(),
-                model_name_owned.as_deref()
-            ).await {
-                Ok(response) => {
-                    // Validate if schema is provided
-                    if let Some(schema_str) = schema_owned.as_deref() {
-                        match validate_json_schema(&response, schema_str) {
-                            Ok(_) => Some(response),
-                            Err(validation_error) => {
-                                Some(create_error_response("validation_failed", &validation_error, Some(&response)))
-                            }
-                        }
-                    } else {
-                        Some(response)
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
-                    Some(create_error_response("api_error", &e.to_string(), None))
-                }
-            }
-        }
-    }).collect::<Vec<_>>();
-
-    futures::future::join_all(fetch_tasks).await
+    let message_arrays = to_user_message_arrays(messages);
+    run_batch(client, &message_arrays, schema, model_name, true).await
 }
 
 /// Enhanced function to fetch data that supports either single messages or arrays of messages
@@ -416,27 +454,7 @@ pub async fn fetch_data_generic_enhanced<T: ModelClient + Sync + ?Sized>(
     client: &T,
     message_arrays: &[Vec<Message>]
 ) -> Vec<Option<String>> {
-    let reqwest_client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_else(|_| Client::new());
-
-    let fetch_tasks = message_arrays.iter().map(|messages| {
-        let messages = messages.clone();
-        let reqwest_client = &reqwest_client;
-
-        async move {
-            match client.send_request(reqwest_client, &messages).await {
-                Ok(response) => Some(response),
-                Err(e) => {
-                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
-                    None
-                }
-            }
-        }
-    }).collect::<Vec<_>>();
-
-    futures::future::join_all(fetch_tasks).await
+    run_batch(client, message_arrays, None, None, false).await
 }
 
 /// Enhanced function with schema validation for message arrays
@@ -446,57 +464,13 @@ pub async fn fetch_data_generic_enhanced_with_schema<T: ModelClient + Sync + ?Si
     schema: Option<&str>,
     model_name: Option<&str>
 ) -> Vec<Option<String>> {
-    let reqwest_client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_else(|_| Client::new());
-
-    let fetch_tasks = message_arrays.iter().map(|messages| {
-        let messages = messages.clone();
-        let reqwest_client = &reqwest_client;
-        let schema_owned = schema.map(|s| s.to_string());
-        let model_name_owned = model_name.map(|s| s.to_string());
-
-        async move {
-            match client.send_request_structured(
-                reqwest_client,
-                &messages,
-                schema_owned.as_deref(),
-                model_name_owned.as_deref()
-            ).await {
-                Ok(response) => {
-                    // Validate if schema is provided
-                    if let Some(schema_str) = schema_owned.as_deref() {
-                        match validate_json_schema(&response, schema_str) {
-                            Ok(_) => Some(response),
-                            Err(validation_error) => {
-                                Some(create_error_response("validation_failed", &validation_error, Some(&response)))
-                            }
-                        }
-                    } else {
-                        Some(response)
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Error fetching from {}: {}", client.provider_name(), e);
-                    Some(create_error_response("api_error", &e.to_string(), None))
-                }
-            }
-        }
-    }).collect::<Vec<_>>();
-
-    futures::future::join_all(fetch_tasks).await
+    run_batch(client, message_arrays, schema, model_name, true).await
 }
 
 /// Example function showing how to use the different model clients with specific models
 pub async fn example_usage(messages: &[String], provider_str: &str, model: &str) -> Vec<Option<String>> {
-    // Parse provider string to Provider enum
     let provider = Provider::from_str(provider_str).unwrap_or(Provider::OpenAI);
-    
-    // Create appropriate client with specified model
     let client = create_client(provider, model);
-    
-    // Use client with generic fetch function
     fetch_data_generic(&*client, messages).await
 }
 
@@ -506,44 +480,35 @@ pub async fn example_usage_enhanced(
     provider_str: &str,
     model: &str
 ) -> Vec<Option<String>> {
-    // Parse provider string to Provider enum
     let provider = Provider::from_str(provider_str).unwrap_or(Provider::OpenAI);
-
-    // Create appropriate client with specified model
     let client = create_client(provider, model);
-
-    // Use client with enhanced generic fetch function
     fetch_data_generic_enhanced(&*client, message_arrays).await
 }
 
-/// Parallel embedding generation function
-/// Uses futures::join_all for memory-efficient parallel processing
+async fn embed_one<T: EmbeddingClient + Sync + ?Sized>(
+    client: &T,
+    text: &String,
+) -> Option<Vec<f64>> {
+    match client.generate_embeddings(http_client(), std::slice::from_ref(text)).await {
+        Ok(embeddings) => embeddings.into_iter().next(),
+        Err(e) => {
+            eprintln!("Error generating embedding from {}: {}", client.provider_name(), e);
+            None
+        }
+    }
+}
+
+/// Parallel embedding generation function with bounded concurrency
 pub async fn fetch_embeddings_generic<T: EmbeddingClient + Sync + ?Sized>(
     client: &T,
     texts: &[String]
 ) -> Vec<Option<Vec<f64>>> {
-    let reqwest_client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_else(|_| Client::new());
+    let requests: Vec<_> = texts.iter().map(|text| embed_one(client, text)).collect();
 
-    // Process each text individually for parallelization
-    let fetch_tasks = texts.iter().map(|text| {
-        let text_batch = vec![text.clone()];
-        let reqwest_client = &reqwest_client;
-
-        async move {
-            match client.generate_embeddings(reqwest_client, &text_batch).await {
-                Ok(embeddings) => embeddings.into_iter().next(),
-                Err(e) => {
-                    eprintln!("Error generating embedding from {}: {}", client.provider_name(), e);
-                    None
-                }
-            }
-        }
-    }).collect::<Vec<_>>();
-
-    futures::future::join_all(fetch_tasks).await
+    futures::stream::iter(requests)
+        .buffered(max_concurrency())
+        .collect()
+        .await
 }
 
 /// Create an embedding client for the given provider and model
@@ -553,4 +518,4 @@ pub fn create_embedding_client(provider: Provider, model: &str) -> Box<dyn Embed
         // Other providers can be added here as they're implemented
         _ => Box::new(openai::OpenAIEmbeddingClient::new_with_model(model)),
     }
-} 
+}

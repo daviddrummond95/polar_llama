@@ -2,7 +2,9 @@ use serde_json::{json, Value};
 use async_trait::async_trait;
 use super::{ModelClient, ModelClientError, Message, Provider};
 use serde::Deserialize;
-use reqwest::Client;
+
+/// Default Gemini model
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.5-flash";
 
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
@@ -32,28 +34,13 @@ pub struct GeminiClient {
 }
 
 impl GeminiClient {
-    // Kept for backward compatibility but marked as deprecated
-    #[deprecated(since = "0.2.0", note = "Use new_with_model instead")]
-    pub fn new() -> Self {
-        Self {
-            model: "gemini-1.5-pro".to_string(),
-            api_key: None,
-        }
-    }
-    
     pub fn new_with_model(model: &str) -> Self {
         Self {
             model: model.to_string(),
             api_key: None,
         }
     }
-    
-    // Renamed to new_with_model, kept for backwards compatibility
-    #[deprecated(since = "0.2.0", note = "Use new_with_model instead")]
-    pub fn with_model(model: &str) -> Self {
-        Self::new_with_model(model)
-    }
-    
+
     pub fn with_api_key(mut self, api_key: &str) -> Self {
         self.api_key = Some(api_key.to_string());
         self
@@ -62,7 +49,7 @@ impl GeminiClient {
 
 impl Default for GeminiClient {
     fn default() -> Self {
-        Self::new_with_model("gemini-1.5-pro")
+        Self::new_with_model(DEFAULT_GEMINI_MODEL)
     }
 }
 
@@ -71,113 +58,84 @@ impl ModelClient for GeminiClient {
     fn provider(&self) -> Provider {
         Provider::Gemini
     }
-    
+
     fn api_endpoint(&self) -> String {
-        format!("https://generativelanguage.googleapis.com/v1beta/models/{}/generateContent", self.model)
+        format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent", self.model)
     }
-    
+
     fn model_name(&self) -> &str {
         &self.model
     }
-    
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+        // Gemini authenticates with the x-goog-api-key header. Using the
+        // header (rather than a ?key= query parameter) keeps the key out of
+        // URLs and logs, and works for both plain and structured requests.
+        request.header("x-goog-api-key", api_key)
+    }
+
     fn format_messages(&self, messages: &[Message]) -> Value {
-        // Check if we need to handle system message specially
-        let system_message = messages.iter().find(|msg| msg.role == "system");
-        
-        // Create formatted messages array
-        let mut formatted_messages = Vec::new();
-        
-        // If system message exists, add it first with special handling
-        if let Some(system) = system_message {
-            formatted_messages.push(json!({
-                "role": "user",
-                "parts": [
-                    {
-                        "text": format!("System instruction: {}", system.content)
-                    }
-                ]
-            }));
-        }
-        
-        // Add remaining non-system messages
-        for msg in messages.iter().filter(|msg| msg.role != "system") {
-            let role = match msg.role.as_str() {
-                "user" => "user",
-                "assistant" => "model", // Gemini uses "model" for assistant messages
-                _ => "user", // Default to user for unknown roles
-            };
-            
-            formatted_messages.push(json!({
-                "role": role,
-                "parts": [
-                    {
-                        "text": msg.content
-                    }
-                ]
-            }));
-        }
-        
+        // System messages are passed via the top-level system_instruction
+        // field (handled in format_request_body) and skipped here.
+        let formatted_messages: Vec<Value> = messages
+            .iter()
+            .filter(|msg| msg.role != "system")
+            .map(|msg| {
+                let role = match msg.role.as_str() {
+                    "assistant" => "model", // Gemini uses "model" for assistant messages
+                    _ => "user",
+                };
+                json!({
+                    "role": role,
+                    "parts": [{ "text": msg.content }]
+                })
+            })
+            .collect();
+
         json!(formatted_messages)
     }
-    
+
     fn format_request_body(&self, messages: &[Message], schema: Option<&str>, _model_name: Option<&str>) -> Value {
         let mut body = json!({
             "contents": self.format_messages(messages),
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 1024
-            }
         });
 
-        // Gemini structured output support is limited, we'll use JSON mode and post-validate
-        if schema.is_some() {
-            body["generationConfig"]["response_mime_type"] = json!("application/json");
+        // Use the native system_instruction field for system prompts
+        if let Some(system) = messages.iter().find(|msg| msg.role == "system") {
+            body["system_instruction"] = json!({
+                "parts": [{ "text": system.content }]
+            });
+        }
+
+        // Native structured output: constrain the response to the JSON schema.
+        // Responses are additionally validated post-hoc by the caller.
+        if let Some(schema_str) = schema {
+            let mut generation_config = json!({
+                "response_mime_type": "application/json"
+            });
+            if let Ok(schema_value) = serde_json::from_str::<Value>(schema_str) {
+                generation_config["response_json_schema"] = schema_value;
+            }
+            body["generationConfig"] = generation_config;
         }
 
         body
     }
 
     fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {
-        match serde_json::from_str::<GeminiResponse>(response_text) {
-            Ok(response) => {
-                if let Some(candidate) = response.candidates.first() {
-                    if let Some(part) = candidate.content.parts.first() {
-                        return Ok(part.text.clone());
-                    }
-                }
-                Err(ModelClientError::ParseError("No response content".to_string()))
-            },
-            Err(err) => {
-                Err(ModelClientError::Serialization(err))
-            }
-        }
+        let response: GeminiResponse = serde_json::from_str(response_text)?;
+        response
+            .candidates
+            .into_iter()
+            .next()
+            .and_then(|candidate| candidate.content.parts.into_iter().next())
+            .map(|part| part.text)
+            .ok_or_else(|| ModelClientError::ParseError("No response content".to_string()))
     }
 
-    async fn send_request(&self, client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
-        let api_key = self.get_api_key();
-        let body = serde_json::to_string(&self.format_request_body(messages, None, None))?;
-
-        let url = format!("{}?key={}", self.api_endpoint(), api_key);
-
-        let response = client.post(url)
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let text = response.text().await?;
-
-        if status.is_success() {
-            self.parse_response(&text)
-        } else {
-            Err(ModelClientError::Http(status.as_u16(), text))
-        }
-    }
-    
     fn get_api_key(&self) -> String {
         self.api_key.clone().unwrap_or_else(|| {
             std::env::var("GEMINI_API_KEY").unwrap_or_default()
         })
     }
-} 
+}

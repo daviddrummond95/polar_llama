@@ -4,6 +4,16 @@ use super::{ModelClient, ModelClientError, Message, Provider};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
 
+/// Default Anthropic model
+pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-opus-4-8";
+
+/// Anthropic Messages API version header value
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Maximum tokens to generate. The Messages API requires this parameter;
+/// 4096 is supported by every Claude model.
+const DEFAULT_MAX_TOKENS: u32 = 4096;
+
 /// System content block with optional cache_control for Anthropic
 #[derive(Debug, Clone, Serialize)]
 struct SystemContentBlock {
@@ -48,30 +58,16 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    // Kept for backward compatibility but marked as deprecated
-    #[deprecated(since = "0.2.0", note = "Use new_with_model instead")]
-    pub fn new() -> Self {
-        Self {
-            model: "claude-3-opus-20240229".to_string(),
-        }
-    }
-    
     pub fn new_with_model(model: &str) -> Self {
         Self {
             model: model.to_string(),
         }
     }
-    
-    // Renamed to new_with_model, kept for backwards compatibility
-    #[deprecated(since = "0.2.0", note = "Use new_with_model instead")]
-    pub fn with_model(model: &str) -> Self {
-        Self::new_with_model(model)
-    }
 }
 
 impl Default for AnthropicClient {
     fn default() -> Self {
-        Self::new_with_model("claude-3-opus-20240229")
+        Self::new_with_model(DEFAULT_ANTHROPIC_MODEL)
     }
 }
 
@@ -80,51 +76,46 @@ impl ModelClient for AnthropicClient {
     fn provider(&self) -> Provider {
         Provider::Anthropic
     }
-    
+
     fn api_endpoint(&self) -> String {
-        "https://api.anthropic.com/v1/messages".to_string()
+        let base = std::env::var("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+        format!("{}/v1/messages", base.trim_end_matches('/'))
     }
-    
+
     fn model_name(&self) -> &str {
         &self.model
     }
-    
+
+    fn apply_auth(&self, request: reqwest::RequestBuilder, api_key: &str) -> reqwest::RequestBuilder {
+        request
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+    }
+
     fn format_messages(&self, messages: &[Message]) -> Value {
-        // Anthropic doesn't support system messages directly in the messages array
-        // We need to find a system message and extract it for the system parameter
-        let mut system_prompt = None;
-        let mut formatted_messages = Vec::new();
-        
-        for msg in messages {
-            match msg.role.as_str() {
-                "system" => {
-                    // Store the first system message encountered 
-                    if system_prompt.is_none() {
-                        system_prompt = Some(msg.content.clone());
-                    }
-                    // Don't add system messages to the regular messages array
-                },
-                "user" | "assistant" => {
-                    // Add user and assistant messages to the messages array
-                    formatted_messages.push(json!({
-                        "role": msg.role,
-                        "content": msg.content
-                    }));
-                },
-                _ => {
+        // The Messages API takes the system prompt as a top-level parameter,
+        // not as a message role; system messages are extracted in
+        // format_request_body and skipped here.
+        let formatted_messages: Vec<Value> = messages
+            .iter()
+            .filter(|msg| msg.role != "system")
+            .map(|msg| {
+                let role = match msg.role.as_str() {
+                    "user" | "assistant" => msg.role.as_str(),
                     // Default other roles to user
-                    formatted_messages.push(json!({
-                        "role": "user",
-                        "content": msg.content
-                    }));
-                }
-            }
-        }
-        
-        // Return the array of messages, system message is handled separately in format_request_body
+                    _ => "user",
+                };
+                json!({
+                    "role": role,
+                    "content": msg.content
+                })
+            })
+            .collect();
+
         json!(formatted_messages)
     }
-    
+
     fn format_request_body(&self, messages: &[Message], schema: Option<&str>, model_name: Option<&str>) -> Value {
         // Check if any system message has cache_control
         let has_cache_control = messages.iter()
@@ -133,11 +124,10 @@ impl ModelClient for AnthropicClient {
         // Format messages (excluding system)
         let formatted_messages = self.format_messages(messages);
 
-        // Build request with or without system parameter
         let mut request = json!({
             "model": self.model_name(),
             "messages": formatted_messages,
-            "max_tokens": 4096
+            "max_tokens": DEFAULT_MAX_TOKENS
         });
 
         // Handle system messages - use content blocks if cache_control is present
@@ -167,7 +157,8 @@ impl ModelClient for AnthropicClient {
             }
         }
 
-        // Add structured output support using tools if schema is provided
+        // Structured outputs via forced tool use: works across all current
+        // Claude models and the tool input is guaranteed to match the schema.
         if let Some(schema_str) = schema {
             if let Ok(schema_value) = serde_json::from_str::<Value>(schema_str) {
                 request["tools"] = json!([{
@@ -184,74 +175,28 @@ impl ModelClient for AnthropicClient {
 
         request
     }
-    
-    fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {
-        match serde_json::from_str::<AnthropicResponse>(response_text) {
-            Ok(response) => {
-                // Check for tool use first (structured outputs)
-                for content in &response.content {
-                    if content.content_type == "tool_use" {
-                        if let Some(input) = &content.input {
-                            // Return the tool input as JSON string
-                            return serde_json::to_string(input)
-                                .map_err(|e| ModelClientError::ParseError(format!("Failed to serialize tool input: {}", e)));
-                        }
-                    }
-                }
 
-                // Fall back to text content
-                for content in &response.content {
-                    if content.content_type == "text" {
-                        if let Some(text) = &content.text {
-                            return Ok(text.clone());
-                        }
-                    }
+    fn parse_response(&self, response_text: &str) -> Result<String, ModelClientError> {
+        let response: AnthropicResponse = serde_json::from_str(response_text)?;
+
+        // Check for tool use first (structured outputs)
+        for content in &response.content {
+            if content.content_type == "tool_use" {
+                if let Some(input) = &content.input {
+                    // Return the tool input as JSON string
+                    return serde_json::to_string(input)
+                        .map_err(|e| ModelClientError::ParseError(format!("Failed to serialize tool input: {e}")));
                 }
-                Err(ModelClientError::ParseError("No text or tool_use content found".to_string()))
-            },
-            Err(err) => {
-                Err(ModelClientError::Serialization(err))
             }
         }
-    }
-    
-    async fn send_request(&self, client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
-        let api_key = self.get_api_key();
-        let body = serde_json::to_string(&self.format_request_body(messages, None, None))?;
 
-        // Check if any message has cache_control to add the beta header
-        let has_cache_control = messages.iter()
-            .any(|msg| msg.cache_control.is_some());
-
-        let mut request = client.post(self.api_endpoint())
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json");
-
-        // Add prompt caching beta header(s) if cache_control is present.
-        // Extended (1h) TTL additionally requires the extended-cache-ttl beta.
-        if has_cache_control {
-            let needs_extended_ttl = messages.iter().any(|msg| {
-                msg.cache_control.as_ref().and_then(|cc| cc.ttl.as_deref()) == Some("1h")
-            });
-            let beta = if needs_extended_ttl {
-                "prompt-caching-2024-07-31,extended-cache-ttl-2025-04-11"
-            } else {
-                "prompt-caching-2024-07-31"
-            };
-            request = request.header("anthropic-beta", beta);
-        }
-
-        let response = request.body(body).send().await?;
-
-        let status = response.status();
-        let text = response.text().await?;
-
-        if status.is_success() {
-            self.parse_response(&text)
-        } else {
-            Err(ModelClientError::Http(status.as_u16(), text))
-        }
+        // Fall back to text content
+        response
+            .content
+            .into_iter()
+            .find(|content| content.content_type == "text")
+            .and_then(|content| content.text)
+            .ok_or_else(|| ModelClientError::ParseError("No text or tool_use content found".to_string()))
     }
 
     async fn send_request_structured(
@@ -259,23 +204,15 @@ impl ModelClient for AnthropicClient {
         client: &Client,
         messages: &[Message],
         schema: Option<&str>,
-        model_name: Option<&str>
+        model_name: Option<&str>,
     ) -> Result<String, ModelClientError> {
         let api_key = self.get_api_key();
-        let body = serde_json::to_string(&self.format_request_body(messages, schema, model_name))?;
+        let body = self.format_request_body(messages, schema, model_name);
 
-        // Check if any message has cache_control to add the beta header
-        let has_cache_control = messages.iter()
-            .any(|msg| msg.cache_control.is_some());
+        let mut request = self.apply_auth(client.post(self.api_endpoint()), &api_key);
 
-        let mut request = client.post(self.api_endpoint())
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json");
-
-        // Add prompt caching beta header(s) if cache_control is present.
-        // Extended (1h) TTL additionally requires the extended-cache-ttl beta.
-        if has_cache_control {
+        // Prompt-caching beta header(s); extended (1h) TTL needs the extra beta.
+        if messages.iter().any(|msg| msg.cache_control.is_some()) {
             let needs_extended_ttl = messages.iter().any(|msg| {
                 msg.cache_control.as_ref().and_then(|cc| cc.ttl.as_deref()) == Some("1h")
             });
@@ -287,15 +224,13 @@ impl ModelClient for AnthropicClient {
             request = request.header("anthropic-beta", beta);
         }
 
-        let response = request.body(body).send().await?;
-
+        let response = request.json(&body).send().await?;
         let status = response.status();
         let text = response.text().await?;
-
         if status.is_success() {
             self.parse_response(&text)
         } else {
             Err(ModelClientError::Http(status.as_u16(), text))
         }
     }
-} 
+}
