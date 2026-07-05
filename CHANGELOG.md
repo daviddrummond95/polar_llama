@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-04
+
+### Added
+- **Local MLX inference backend** — `col(...).llama.inference_local(...)` for on-device batched generation on Apple Silicon, with two engines:
+  - `engine="server"` (default): points the existing async fan-out at a local OpenAI-compatible endpoint (`mlx_lm.server` / vllm-mlx) via `OPENAI_BASE_URL` — no Rust changes.
+  - `engine="in_process"`: a `map_batches` UDF wrapping `mlx_lm`'s `BatchGenerator`, behind a `LocalEngine` protocol with a `FakeEngine` seam so the batching/ordering/error-isolation logic is testable on CPU/CI without a GPU. Optional extra: `pip install polar-llama[local]`.
+- **Collapsed prefix prefill** (`polar_llama/local/collapsed_prefill.py`): computes a shared prompt prefix once instead of re-prefilling it per row (token-level longest-common-prefix + suffix-only batching). Measured **10.36× vs sequential** on gemma-3n E4B (32 rows, 5 KB shared prompt) at 32/32 exact greedy parity.
+- **Batched quantized KV cache** (`BatchQuantizedKVCache`; opt-in via `POLAR_LLAMA_LOCAL_KV_BITS=4`): closes mlx-lm's "quantized KV × batching" gap. ~47% KV-memory cut (Q4) at parity with fp16 batched output, roughly doubling the batch/context that fits in 24 GB (memory/capacity win; not a throughput speedup with the current unfused attention path).
+- **mlx-lm #1384 fix** (runtime monkeypatch, `polar_llama/local/_mlx_patches.py`): corrects a RoPE offset-aliasing bug that garbled *batched* generation on hybrid Gemma 3n / Gemma 4 models; verified token-identical to sequential. Ready-to-post upstream PR in `patches/PR_1384.md`.
+- Build-vs-buy gate benchmark (`benchmarks/local_mlx_gate.py`), parity/throughput validators, and design/decision docs under `docs/`.
+
+### Notes
+- The local backend and its Apple-GPU tests are opt-in; CI runs the CPU-safe logic tests (`-m "not local_gpu"`, FakeEngine, no mlx). The `[local]` extra requires Python ≥ 3.10.
+
 ## [0.3.0] - 2026-06-10
 
 ### Added
