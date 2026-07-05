@@ -247,3 +247,39 @@ class TestInstructionOptimizer:
         )
         compiled = optimizer.compile(module, trainset)
         assert compiled.signature.instructions == module.signature.instructions
+
+    def test_llm_proposer_returns_json_list(self):
+        # Regression: when the proposer LLM returns the `instructions` output
+        # field as a JSON *array* (common with small local models), the
+        # prediction lands as a polars List cell. The default `_propose` path
+        # must flatten it instead of crashing on `if not raw` (Series truth
+        # value is ambiguous).
+        def listy_backend(messages, output_model):
+            fields = list(output_model.model_fields)
+            if "instructions" in fields:
+                # proposer call: return a JSON list, not a newline string
+                return [
+                    json.dumps({"instructions": ["please SHOUT the answer", "whisper it"]})
+                    for _ in messages
+                ]
+            out = []
+            for raw in messages:
+                convo = json.loads(raw)
+                system = convo[0]["content"]
+                question = convo[-1]["content"].split("question: ", 1)[-1]
+                out.append(
+                    json.dumps({"answer": question.upper() if "SHOUT" in system else question})
+                )
+            return out
+
+        module = Predict("question -> answer", inference_fn=listy_backend).with_instructions(
+            "answer politely"
+        )
+        trainset = pl.DataFrame({"question": ["ab"], "answer": ["AB"]})
+
+        # No proposer_fn -> exercises the default LLM `_propose` path.
+        optimizer = InstructionOptimizer(metric=exact_match, n_candidates=2)
+        compiled = optimizer.compile(module, trainset)  # must not raise
+
+        assert "SHOUT" in compiled.signature.instructions
+        assert evaluate(compiled, trainset, exact_match).score == 1.0

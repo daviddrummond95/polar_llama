@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-05
+
+### Added
+- **Local prompt-tuning bridge** — `polar_llama.local.make_local_inference_fn(model, ...)` returns an `inference_fn` that drives `polar_llama.optimize`'s DSPy-style `Predict` / `BootstrapFewShot` / `InstructionOptimizer` against on-device gemma-3n (mlx-lm), with no cloud/Rust path. It reuses the singleton-loaded weights and applies the mlx-lm #1384 batched fix automatically.
+- **Collapsed-prefill opt-in for `inference_local(engine="in_process")`** via `POLAR_LLAMA_LOCAL_COLLAPSE=1` — shares the common prompt prefix across rows (also the bridge's default). Measured **~2.8× faster on a full prompt-tuning schedule** (3.4× on a demo-laden eval) at identical, parity-verified output; the dominant speedup whenever rows share a long prefix (a shared `system` prompt, or few-shot demos during tuning). Mutually exclusive with `POLAR_LLAMA_LOCAL_KV_BITS` (that path takes precedence).
+- `MlxBatchEngine.get_model_and_tokenizer()` to reuse the singleton-loaded weights.
+
+### Fixed
+- `InstructionOptimizer` no longer crashes with `TypeError: the truth value of a Series is ambiguous` when the proposer model returns the `instructions` field as a JSON array instead of a newline-delimited string — list/Series values are flattened to newline-delimited text (`polar_llama/optimize.py`). This surfaces with small local models that emit `{"instructions": [...]}`.
+
 ## [0.5.0] - 2026-07-04
 
 ### Added

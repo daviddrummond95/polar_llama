@@ -31,6 +31,7 @@ __all__ = [
     "start_server_backend",
     "batch_generate_quantized",
     "make_quantized_prompt_cache",
+    "make_local_inference_fn",
 ]
 
 # Names lazily re-exported from sibling modules, keyed by the module that
@@ -46,6 +47,7 @@ _LAZY_ATTRS = {
     "start_server_backend": "server_backend",
     "batch_generate_quantized": "batch_quantized_kv",
     "make_quantized_prompt_cache": "batch_quantized_kv",
+    "make_local_inference_fn": "optimize_bridge",
 }
 
 
