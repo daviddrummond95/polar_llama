@@ -197,6 +197,41 @@ if error:
     print(f"Raw response: {df['recommendation'].struct.field('_raw')[0]}")
 ```
 
+#### Local Inference (Apple Silicon / MLX)
+
+Run inference **on-device** on Apple Silicon instead of a provider API — no keys, no network — via [mlx-lm](https://github.com/ml-explore/mlx-lm). Install the extra (Apple Silicon, Python ≥ 3.10):
+
+```bash
+pip install "polar-llama[local]"
+```
+
+```python
+import polars as pl
+import polar_llama  # registers the .llama namespace
+
+df = pl.DataFrame({"ticket": [
+    "My laptop won't turn on even when it's plugged in.",
+    "I forgot my password and I'm locked out of my account.",
+]})
+
+tagged = df.with_columns(
+    tag=pl.col("ticket").llama.inference_local(
+        model="mlx-community/gemma-3n-E4B-it-lm-4bit",
+        system="Classify the ticket as exactly one of: Hardware, Account, Billing.",
+        engine="in_process",   # on-device mlx-lm, batched over the column
+        max_tokens=16,
+        temperature=0.0,
+    )
+)
+```
+
+Two engines are available:
+
+- **`engine="in_process"`** — batched generation directly via `mlx-lm` (`BatchGenerator` / `batch_generate`); nothing to run separately.
+- **`engine="server"`** (default) — routes the existing async fan-out to a local OpenAI-compatible endpoint (`mlx_lm.server`) via `OPENAI_BASE_URL`.
+
+**Collapsed prefill.** When rows share a long common prefix (a shared `system` prompt, or few-shot demos), set `POLAR_LLAMA_LOCAL_COLLAPSE=1` to compute that prefix once instead of re-prefilling it per row — a large speedup for prefill-bound workloads, at parity-verified output. Hybrid Gemma 3n / Gemma 4 models need the mlx-lm [#1384](https://github.com/ml-explore/mlx-lm/issues/1384) batched-RoPE fix, which Polar Llama applies automatically. See [`docs/local_mlx_backend.md`](docs/local_mlx_backend.md).
+
 #### Prompt Optimization (DSPy-style)
 
 Polar Llama ships a lightweight prompt optimization engine inspired by [DSPy](https://github.com/stanfordnlp/dspy). Declare your task as a `Signature`, wrap it in a `Predict` module, and let an optimizer tune the prompt against your labeled DataFrame — every candidate is evaluated with one parallel, batched inference call:
@@ -251,6 +286,21 @@ sig = Signature(
         "confidence": OutputField(desc="confidence from 0.0 to 1.0", dtype=float),
     },
 )
+```
+
+**Optimize entirely on-device.** Drive the optimizer with a local model instead of a provider by passing an `inference_fn` — no API keys, no network:
+
+```python
+from polar_llama.local import make_local_inference_fn
+
+# Backs Predict/BootstrapFewShot/InstructionOptimizer with on-device gemma-3n
+# (mlx-lm). Collapsed prefill (on by default) shares the system+demos prefix
+# across rows — the dominant speedup during tuning, where few-shot demos make
+# that prefix ~80% of every prompt (~2.8x on a full tuning schedule, at
+# identical output). Requires the [local] extra.
+fn = make_local_inference_fn("mlx-community/gemma-3n-E4B-it-lm-4bit")
+module = Predict(Signature("note -> category", instructions="Classify the note."), inference_fn=fn)
+compiled = InstructionOptimizer(metric=exact_match).compile(module, trainset)
 ```
 
 #### Vector Embeddings

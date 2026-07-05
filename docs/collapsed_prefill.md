@@ -166,6 +166,23 @@ first *generated* token's KV in addition to the prompt (defect 3 above), so
 it is not a clean prompt-only cache; `make_prompt_cache` + manual prefill is
 the reliable way to warm a prefix.
 
+## Enabling it in the backend
+
+The mechanism above is exposed two ways for end users:
+
+- **`inference_local(engine="in_process")`** — set the environment variable
+  `POLAR_LLAMA_LOCAL_COLLAPSE=1`. It applies when the batch's rows share a long
+  prefix (a common `system` prompt) and falls back to plain `batch_generate`
+  when the shared prefix is short, so it is safe to leave on. Mutually exclusive
+  with `POLAR_LLAMA_LOCAL_KV_BITS` (the quantized-KV path takes precedence).
+- **Prompt tuning** — `polar_llama.local.make_local_inference_fn(model,
+  collapse=True)` (the default) uses it under the hood. This is where it pays
+  off most: few-shot demos make the shared system+demos prefix ~80% of every
+  prompt, re-prefilled for every row of every candidate evaluation. Measured
+  **~2.8× on a full `InstructionOptimizer` schedule** (254 s → 90 s) and 3.4× on
+  a single demo-laden eval, at byte-identical accuracy. See
+  [`local_mlx_backend.md`](local_mlx_backend.md#prompt-tuning-on-device-make_local_inference_fn).
+
 ## Files
 
 - `polar_llama/local/collapsed_prefill.py` — mechanism (CI-safe import; mlx

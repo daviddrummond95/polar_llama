@@ -189,6 +189,59 @@ aware of the following before relying on it in production:
   fake, deterministic engine with no GPU and no `mlx` import. The real
   `mlx-lm` code path is exercised manually on Apple Silicon, not in CI.
 
+## Collapsed prefill (`POLAR_LLAMA_LOCAL_COLLAPSE`)
+
+When the rows of a batch share a long common prefix — a shared `system` prompt,
+or few-shot demonstrations during prompt tuning — the in-process engine
+re-prefills that identical prefix for every row. Set
+`POLAR_LLAMA_LOCAL_COLLAPSE=1` to compute the shared token prefix **once** and
+batch only the per-row suffixes (token-level longest-common-prefix; see
+[`collapsed_prefill.md`](collapsed_prefill.md)):
+
+```bash
+POLAR_LLAMA_LOCAL_COLLAPSE=1 python tag_column.py
+```
+
+It falls back to the plain `batch_generate` path automatically when the shared
+prefix is short, so it is safe to leave on. Output is parity-verified against the
+stock path. This is a **prefill**-side speedup: it does the most for workloads
+that are prefill-bound (long shared context, short generations) — where simply
+enlarging the batch does little, because prefill is already compute-bound at
+batch 1. It is mutually exclusive with `POLAR_LLAMA_LOCAL_KV_BITS` (the quantized
+KV path takes precedence when both are set).
+
+## Prompt tuning on-device (`make_local_inference_fn`)
+
+[`polar_llama.optimize`](../README.md#prompt-optimization-dspy-style) (the
+DSPy-style prompt optimizer) normally runs against a remote provider. To
+optimize prompts entirely on-device, pass an `inference_fn` built by
+`polar_llama.local.make_local_inference_fn`:
+
+```python
+import polar_llama.optimize as po
+from polar_llama.local import make_local_inference_fn
+
+fn = make_local_inference_fn(
+    "mlx-community/gemma-3n-E4B-it-lm-4bit",
+    collapse=True,     # collapsed prefill on by default
+    max_tokens=256,
+)
+module = po.Predict(signature, inference_fn=fn)
+tuned = po.InstructionOptimizer(metric=my_metric).compile(module, trainset)
+```
+
+The bridge applies the mlx-lm [#1384](https://github.com/ml-explore/mlx-lm/issues/1384)
+batched fix automatically and reuses the singleton-loaded weights (so it shares
+memory with any `inference_local(engine="in_process")` calls on the same model).
+
+Collapsed prefill is especially valuable here: few-shot demos make the shared
+system+demos prefix roughly **80% of every prompt**, and it is otherwise
+re-prefilled for every row of every candidate evaluation. Measured on an M4 Pro
+(gemma-3n-E4B, 8-way classification): a full `BootstrapFewShot` +
+`InstructionOptimizer` schedule ran **~2.8× faster** with collapse on (254 s →
+90 s), and **3.4× faster** on a single demo-laden evaluation, at **byte-identical
+accuracy**.
+
 ## Memory and batch-size expectations
 
 Figures below are **measured 4-bit-quantized weight footprints**, not
