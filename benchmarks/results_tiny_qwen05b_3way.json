@@ -1,0 +1,66 @@
+{
+  "model": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+  "rows": 16,
+  "max_tokens": 48,
+  "system_prompt_chars": 5135,
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "parity_failure": null,
+  "results": [
+    {
+      "mode": "sequential",
+      "ok": true,
+      "wall_s": 5.730158084072173,
+      "load_s": 0.3908932500053197,
+      "output_tokens": 470,
+      "effective_tok_s": 82.02216991297935,
+      "ttft_s": [
+        0.2870421251282096,
+        0.2790888750459999,
+        0.2733124999795109,
+        0.2860145000740886,
+        0.2721647920552641,
+        0.2688397918827832,
+        0.2698353750165552,
+        0.26905916607938707,
+        0.2713147080503404,
+        0.2849211669526994,
+        0.2696095001883805,
+        0.2621058749500662,
+        0.2657712500076741,
+        0.2610914579126984,
+        0.2622100841253996,
+        0.26523949997499585
+      ],
+      "peak_mem_gb": 1.2051115147769451,
+      "rows": 16,
+      "note": "",
+      "ttft_p50_s": 0.2698353750165552
+    },
+    {
+      "mode": "in_process",
+      "ok": true,
+      "wall_s": 5.125571999931708,
+      "load_s": 0.3908932500053197,
+      "output_tokens": 511,
+      "effective_tok_s": 99.69619000704867,
+      "ttft_s": null,
+      "peak_mem_gb": 1.6116730105131865,
+      "rows": 16,
+      "note": "replicated system-prefix prompt_caches; per-row TTFT needs BatchGenerator streaming (not measured)",
+      "ttft_p50_s": null
+    },
+    {
+      "mode": "server",
+      "ok": true,
+      "wall_s": 3.653642416931689,
+      "load_s": null,
+      "output_tokens": 1058,
+      "effective_tok_s": 289.5740412627745,
+      "ttft_s": null,
+      "peak_mem_gb": null,
+      "rows": 16,
+      "note": "client RSS delta 0.00 GB; server memory not instrumented -- read it from `mlx_lm.server` logs or Activity Monitor",
+      "ttft_p50_s": null
+    }
+  ]
+}

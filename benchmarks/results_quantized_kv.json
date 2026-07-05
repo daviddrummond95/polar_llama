@@ -1,0 +1,104 @@
+{
+ "model": "mlx-community/Qwen3-8B-4bit",
+ "platform": "Apple M4 Pro, 24 GB, mlx 0.31.2 / mlx-lm 0.31.3",
+ "group_size": 64,
+ "parity": {
+  "rows": 8,
+  "max_tokens": 64,
+  "fp16_ceiling": {
+   "faithfulness": 0.99609375,
+   "teacher_forced_quality": 0.99609375
+  },
+  "q8": {
+   "faithfulness": 0.984375,
+   "faithfulness_gate": 0.96601562,
+   "teacher_forced_quality": 0.9921875,
+   "tf_gate": 0.95,
+   "free_run_vs_fp16": 0.91015625,
+   "pass": true
+  },
+  "q4": {
+   "faithfulness": 0.98046875,
+   "faithfulness_gate": 0.93609375,
+   "teacher_forced_quality": 0.939453125,
+   "tf_gate": 0.85,
+   "free_run_vs_fp16": 0.326171875,
+   "pass": true
+  },
+  "pass": true,
+  "metric_notes": "teacher-forced (cascade-free) argmax agreement; free-run reported for context only"
+ },
+ "memory_kvbytes_deterministic": {
+  "budget_gb": 19.07,
+  "weights_gb": 4.6,
+  "context_tokens": 2816,
+  "rows": [
+   {
+    "batch": 8,
+    "context": 2816,
+    "fp16_gb": 3.321888768,
+    "q8_gb": 1.764753408,
+    "q4_gb": 0.934281216,
+    "q8_ratio": 0.53125,
+    "q4_ratio": 0.28125
+   },
+   {
+    "batch": 16,
+    "context": 2816,
+    "fp16_gb": 6.643777536,
+    "q8_gb": 3.529506816,
+    "q4_gb": 1.868562432,
+    "q8_ratio": 0.53125,
+    "q4_ratio": 0.28125
+   },
+   {
+    "batch": 24,
+    "context": 2816,
+    "fp16_gb": 9.965666304,
+    "q8_gb": 5.294260224,
+    "q4_gb": 2.802843648,
+    "q8_ratio": 0.53125,
+    "q4_ratio": 0.28125
+   },
+   {
+    "batch": 32,
+    "context": 2816,
+    "fp16_gb": 13.287555072,
+    "q8_gb": 7.059013632,
+    "q4_gb": 3.737124864,
+    "q8_ratio": 0.53125,
+    "q4_ratio": 0.28125
+   },
+   {
+    "batch": 48,
+    "context": 2816,
+    "fp16_gb": 19.931332608,
+    "q8_gb": 10.588520448,
+    "q4_gb": 5.605687296,
+    "q8_ratio": 0.53125,
+    "q4_ratio": 0.28125
+   },
+   {
+    "batch": 64,
+    "context": 2816,
+    "fp16_gb": 26.575110144,
+    "q8_gb": 14.118027264,
+    "q4_gb": 7.474249728,
+    "q8_ratio": 0.53125,
+    "q4_ratio": 0.28125
+   }
+  ],
+  "pass": true
+ },
+ "memory_measured_peaks_gb": {
+  "note": "live run under heavy external memory pressure; fp16 could not complete",
+  "q8_b16": 9.24,
+  "q4_b16": 7.47,
+  "fp16_b16": "died_metal_oom",
+  "fp16_b32": "crashed_process_os_oom",
+  "q8_b32_deterministic": 11.7,
+  "q4_b32_deterministic": 8.3
+ },
+ "kernel_needed": false,
+ "overall_pass": true
+}

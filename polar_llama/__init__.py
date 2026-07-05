@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Union, Type, Dict, Any
+from typing import TYPE_CHECKING, Optional, Union, Type, Dict, Any, List
 import json
 
 import polars as pl
@@ -1249,7 +1249,74 @@ class LlamaNamespace:
             cache=cache,
             system_prompt=system_prompt,
         )
-    
+
+    def inference_local(
+        self,
+        *,
+        model: str,
+        system: Optional[str] = None,
+        engine: str = "server",
+        base_url: Optional[str] = None,
+        max_tokens: int = 512,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        stop: Optional[List[str]] = None,
+    ) -> pl.Expr:
+        """
+        Infer completions for the expression using a local model.
+
+        Runs completions against a model on this machine instead of a remote
+        provider API. Completions are returned as String in the original row
+        order.
+
+        Parameters
+        ----------
+        model : str
+            Model identifier. An OpenAI-compatible model name for
+            ``engine="server"``, or an mlx-lm model path/repo for
+            ``engine="in_process"``.
+        system : str, optional
+            System prompt. Kept as a separate argument so it forms an immutable
+            prefix (the basis for prefix caching on the local engine).
+        engine : str, optional
+            ``"server"`` (default) routes through the existing async fan-out to
+            a local OpenAI-compatible endpoint (no Rust changes; low risk).
+            ``"in_process"`` uses the in-process mlx engine via a ``map_batches``
+            UDF and requires the optional ``[local]`` extra
+            (``pip install polar-llama[local]``).
+        base_url : str, optional
+            Base URL of the local OpenAI-compatible server
+            (``engine="server"`` only).
+        max_tokens : int, optional
+            Maximum number of tokens to generate (default: 512).
+        temperature : float, optional
+            Sampling temperature (default: 0.0).
+        top_p : float, optional
+            Nucleus sampling probability (default: 1.0).
+        stop : list of str, optional
+            Stop sequences that halt generation.
+
+        Returns
+        -------
+        polars.Expr
+            Expression with String completions, in the original row order.
+        """
+        # Imported lazily so that a top-level ``import polar_llama`` never pulls
+        # in the local backend (and therefore never risks importing mlx).
+        from polar_llama.local.expr import inference_local as _inference_local
+
+        return _inference_local(
+            self._expr,
+            model=model,
+            system=system,
+            engine=engine,
+            base_url=base_url,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop,
+        )
+
     def tag_taxonomy(
         self,
         taxonomy: Dict[str, Dict[str, Any]],

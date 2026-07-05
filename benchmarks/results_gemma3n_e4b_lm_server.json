@@ -1,0 +1,23 @@
+{
+  "model": "mlx-community/gemma-3n-E4B-it-lm-4bit",
+  "rows": 32,
+  "max_tokens": 128,
+  "system_prompt_chars": 5135,
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "parity_failure": null,
+  "results": [
+    {
+      "mode": "server",
+      "ok": true,
+      "wall_s": 65.5044005420059,
+      "load_s": null,
+      "output_tokens": null,
+      "effective_tok_s": null,
+      "ttft_s": null,
+      "peak_mem_gb": null,
+      "rows": 32,
+      "note": "client RSS delta 0.01 GB; server memory not instrumented -- read it from `mlx_lm.server` logs or Activity Monitor",
+      "ttft_p50_s": null
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "model": "mlx-community/Qwen3-8B-4bit",
+  "rows": 16,
+  "max_tokens": 128,
+  "system_prompt_chars": 5135,
+  "platform": "macOS-26.5.1-arm64-arm-64bit",
+  "parity_failure": null,
+  "results": [
+    {
+      "mode": "sequential",
+      "ok": true,
+      "wall_s": 101.486667457968,
+      "load_s": 1.2261424160096794,
+      "output_tokens": 2048,
+      "effective_tok_s": 20.179990646044274,
+      "ttft_s": [
+        3.726998999947682,
+        3.6890583750791848,
+        3.689331084024161,
+        3.6770410840399563,
+        3.6943804170005023,
+        3.697884334018454,
+        3.6975013751070946,
+        3.9762195830699056,
+        4.018756249919534,
+        3.6870104169938713,
+        3.686524915974587,
+        3.693006500136107,
+        3.682883500121534,
+        3.6965639172121882,
+        3.718000791966915,
+        3.711426000110805
+      ],
+      "peak_mem_gb": 5.1697712652385235,
+      "rows": 16,
+      "note": "",
+      "ttft_p50_s": 3.6965639172121882
+    },
+    {
+      "mode": "in_process",
+      "ok": true,
+      "wall_s": 75.63912258390337,
+      "load_s": 1.2261424160096794,
+      "output_tokens": 2048,
+      "effective_tok_s": 27.07593544237954,
+      "ttft_s": null,
+      "peak_mem_gb": 9.599555104970932,
+      "rows": 16,
+      "note": "prefix cache disabled; plain batch_generate; per-row TTFT needs BatchGenerator streaming (not measured)",
+      "ttft_p50_s": null
+    }
+  ]
+}

@@ -1,28 +1,34 @@
 # cargo-audit configuration
-# This file documents security advisories that are temporarily accepted with justification
+# Security advisories temporarily accepted with written justification.
+# (The CI `security-audit` job also passes these via --ignore, belt-and-suspenders.)
+#
+# RUSTSEC-2025-0020 (PyO3 buffer overflow in PyString::from_object) was removed
+# from this list on 2026-07-04: it is fixed in pyo3 >= 0.24.1 and we ship
+# pyo3 0.27.2, so it no longer fires.
 
 [advisories]
-# Ignore list for known and accepted vulnerabilities
 ignore = [
-    "RUSTSEC-2025-0020",  # PyO3 buffer overflow - see details below
+    # ---- pyo3 < 0.29 advisories: blocked by the pyo3-polars pin ----
+    #
+    # STATUS: Accepted (temporary), blocked upstream.
+    #
+    # pyo3-polars provides the `#[polars_expr]` plugin machinery this crate is
+    # built on. As of 2026-07-04 its latest release (0.27.0) still depends on
+    # pyo3 0.28 — which is ALSO affected by these advisories — and NO published
+    # pyo3-polars release supports pyo3 0.29 (the first patched line). So we
+    # cannot move to the patched pyo3 without pola-rs shipping a compatible
+    # pyo3-polars. Verified empirically: a pyo3 0.29 / pyo3-polars 0.27 bump
+    # fails to resolve (pyo3-polars 0.27 -> pyo3 ^0.28).
+    #
+    # RISK: LOW for our usage. Our direct pyo3 surface is minimal (~8 lines) and
+    # does not exercise the affected PyList/PyTuple `nth`/`nth_back` iterator
+    # paths (0176) or `PyCFunction::new_closure` closures (0177).
+    #
+    # TRACK: https://github.com/pola-rs/pyo3-polars — upgrade pyo3 to >= 0.29 and
+    # drop these ignores once a pyo3-0.29-compatible pyo3-polars is released.
+    "RUSTSEC-2026-0176",  # OOB read in nth/nth_back for PyList/PyTuple iterators (fixed in pyo3 >= 0.29)
+    "RUSTSEC-2026-0177",  # Missing Sync bound on PyCFunction::new_closure closures (fixed in pyo3 >= 0.29)
 ]
 
-# PyO3 buffer overflow in PyString::from_object
-# RUSTSEC-2025-0020
-#
-# STATUS: Accepted (Temporary)
-# REASON: Blocked by pyo3-polars dependency
-#
-# Details:
-# - pyo3-polars 0.20.0 (required for polars 0.46.0) only supports pyo3 0.23
-# - pyo3-polars 0.25.0 requires polars 0.52.0, which has Rust compatibility issues
-# - The vulnerability is in PyString::from_object, which we do not directly use
-# - Risk is assessed as LOW for our use case
-#
-# Mitigation plan:
-# 1. Monitor pyo3-polars and polars releases
-# 2. Upgrade when polars 0.52+ stabilizes (expected within 1-2 months)
-# 3. Track upstream issue: https://github.com/pola-rs/pyo3-polars/issues
-#
-# Last reviewed: 2025-01-20
-# Review again: 2025-03-20 (or when polars 0.52+ is stable)
+# Last reviewed: 2026-07-04 (pyo3 0.27.2, pyo3-polars 0.26, polars 0.53)
+# Review again: when pola-rs releases a pyo3-polars supporting pyo3 >= 0.29
