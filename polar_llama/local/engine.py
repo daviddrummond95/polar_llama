@@ -271,6 +271,16 @@ class MlxBatchEngine:
             )
             self._loaded = True
 
+    def get_model_and_tokenizer(self):
+        """Return the loaded ``(model, tokenizer)``, loading once if needed.
+
+        Exposed so advanced callers (e.g. the ``optimize.py`` local bridge in
+        :mod:`polar_llama.local.optimize_bridge`) can reuse the singleton-loaded
+        weights instead of loading a second copy into GPU memory.
+        """
+        self._ensure_loaded()
+        return self._model, self._tokenizer
+
     # -- sampling param conversion -----------------------------------------
     def _make_sampler(self, temperature: float, top_p: float):
         from mlx_lm.sample_utils import make_sampler  # type: ignore
@@ -417,6 +427,36 @@ class MlxBatchEngine:
                     )
                     texts = getattr(outputs, "texts", outputs)
                     return [str(t) for t in texts]
+            except Exception:  # noqa: BLE001 -- never fail closed; use fp16 path
+                pass
+
+        # Opt-in *collapsed prefill*: set ``POLAR_LLAMA_LOCAL_COLLAPSE=1`` to
+        # compute the shared token prefix once instead of re-prefilling it for
+        # every row. This is the dominant speedup when rows share a long common
+        # prefix -- e.g. a shared ``system`` prompt, or few-shot demos during
+        # prompt tuning (see docs/collapsed_prefill.md; ~3.4x measured on a
+        # demo-laden tagging eval). Output-parity with the stock path is
+        # verified (benchmarks/validate_collapsed_prefill.py); it falls back to
+        # plain batch_generate when the shared prefix is short. The
+        # POLAR_LLAMA_LOCAL_KV_BITS path above returns before reaching here when
+        # it runs, so the two do not stack (if KV_BITS is set but unavailable,
+        # control falls through to collapse, which is also parity-verified).
+        collapse_env = os.environ.get("POLAR_LLAMA_LOCAL_COLLAPSE", "")
+        if collapse_env.strip().lower() not in ("", "0", "false", "no"):
+            try:
+                from polar_llama.local.collapsed_prefill import (  # type: ignore
+                    collapsed_batch_generate,
+                )
+
+                outputs = collapsed_batch_generate(
+                    self._model,
+                    self._tokenizer,
+                    prompt_tokens,
+                    max_tokens=max_tokens,
+                    sampler=sampler,
+                )
+                texts = getattr(outputs, "texts", outputs)
+                return [str(t) for t in texts]
             except Exception:  # noqa: BLE001 -- never fail closed; use fp16 path
                 pass
 

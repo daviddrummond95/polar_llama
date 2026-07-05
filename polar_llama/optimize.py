@@ -513,6 +513,15 @@ class InstructionOptimizer:
         )
         result = proposer(pl.DataFrame({"task_description": [prompt]}))
         raw = result.get_column("pred_instructions")[0]
-        if not raw:
+        # A model may return the instructions field as a JSON array rather than
+        # a newline-delimited string. That lands here as a polars Series (a
+        # List-typed cell) or a Python list; flatten either to newline-separated
+        # text before splitting. (Indexing a List column returns a Series, whose
+        # truth value is ambiguous -- so this must run before any `if not raw`.)
+        if isinstance(raw, pl.Series):
+            raw = "\n".join(str(x) for x in raw.to_list())
+        elif isinstance(raw, (list, tuple)):
+            raw = "\n".join(str(x) for x in raw)
+        if raw is None or not str(raw).strip():
             return []
         return [line.strip("-• \t") for line in str(raw).splitlines() if line.strip()]
