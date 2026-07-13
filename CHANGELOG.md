@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-12
+
 ### Fixed
 - `inference_local(engine="in_process")` on Gemma 3n no longer crashes end-to-end (#70). The mlx-lm #1384 batched shared-KV fix was only applied on the prompt-tuning bridge/benchmark paths, never on the `inference_local` load path, so `MlxBatchEngine` loaded gemma-3n unpatched and batched generation raised `ValueError: too many values to unpack (expected 2)`. Both this patch and a new guard are now applied automatically at model load (`polar_llama/local/engine.py::_apply_mlx_patches`).
 - Unmasked the real in-process error: `mlx_lm.generate.BatchGenerator.stats` divided `prompt_tokens / prompt_time` with `prompt_time == 0` in its teardown, raising `ZeroDivisionError` *during* exception handling and replacing the underlying error. A new guarded, idempotent patch (`apply_batchgen_stats_zerodiv_patch`) wraps the context manager so a body exception is never masked and a zero-time exit yields `tps = 0.0`.
