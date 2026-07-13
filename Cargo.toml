@@ -8,7 +8,7 @@ name = "polar_llama"
 crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
-pyo3-build-config = "0.27"
+pyo3-build-config = "0.29"
 
 [dependencies]
 pyo3 = { version = "0.27", features = ["extension-module", "abi3-py39"] }
