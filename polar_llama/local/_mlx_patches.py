@@ -1,6 +1,6 @@
-"""Runtime workarounds for upstream mlx-lm bugs.
+"""Runtime workarounds for upstream mlx-lm bugs (see issue #70).
 
-Currently contains a single patch:
+Contains two independent, guarded, idempotent patches:
 
 ``apply_gemma3n_batched_shared_kv_patch``
     Works around https://github.com/ml-explore/mlx-lm/issues/1384 (present in
@@ -41,6 +41,22 @@ Currently contains a single patch:
             apply_gemma3n_batched_shared_kv_patch,
         )
         apply_gemma3n_batched_shared_kv_patch()
+
+    ``apply_batchgen_stats_zerodiv_patch``
+        Works around an unguarded division in ``mlx_lm.generate``'s
+        ``BatchGenerator.stats`` context manager (mlx-lm <= 0.31.3): its
+        ``finally`` computes ``stats.prompt_tps = prompt_tokens / prompt_time``
+        with no zero guard. When ``prompt_time == 0`` this raises
+        ``ZeroDivisionError`` from inside the ``finally`` -- during exception
+        teardown it *replaces* the real error the caller raised (masking), and
+        on a clean zero-work exit it crashes outright. The patch wraps the
+        original context manager: it never masks the body's exception, and on a
+        clean exit it converts a zero-time ``ZeroDivisionError`` into
+        ``tps = 0.0``. In that zero corner case upstream's post-division
+        accumulation (generation_tokens/time and peak_memory) is skipped; this
+        is acceptable (no work was done). The patch is a no-op if mlx-lm is
+        absent or once upstream guards the division. Like the gemma3n patch it
+        is applied explicitly, at model load, not on import.
 """
 
 from __future__ import annotations
@@ -49,6 +65,7 @@ import inspect
 from typing import Any, Optional
 
 _PATCH_FLAG = "_polar_llama_1384_patched"
+_STATS_PATCH_FLAG = "_polar_llama_stats_zerodiv_patched"
 
 
 def apply_gemma3n_batched_shared_kv_patch() -> bool:
@@ -265,4 +282,76 @@ def apply_gemma3n_batched_shared_kv_patch() -> bool:
     gemma3n.Gemma3nDecoderLayer.__call__ = decoder_layer_call
     gemma3n.LanguageModel.__call__ = language_model_call
     setattr(gemma3n, _PATCH_FLAG, True)
+    return True
+
+
+def apply_batchgen_stats_zerodiv_patch() -> bool:
+    """Guard ``mlx_lm.generate.BatchGenerator.stats`` against divide-by-zero.
+
+    The upstream context manager computes ``prompt_tps = prompt_tokens /
+    prompt_time`` in a ``finally`` with no zero guard (mlx-lm <= 0.31.3). This
+    wraps it so that (a) an exception raised in the ``with`` body is never
+    masked by a teardown ``ZeroDivisionError``, and (b) a clean zero-time exit
+    yields ``tps = 0.0`` instead of crashing.
+
+    Returns:
+        ``True`` if the guard is active (just applied or applied earlier),
+        ``False`` if not needed (mlx-lm absent, API changed, or upstream
+        already guards the division).
+    """
+    import importlib
+    from contextlib import contextmanager
+
+    try:
+        gen_mod = importlib.import_module("mlx_lm.generate")
+    except ImportError:
+        return False  # mlx-lm absent (or sys.modules sentinel): no-op
+
+    # Idempotent: never wrap twice.
+    if getattr(gen_mod, _STATS_PATCH_FLAG, False):
+        return True
+
+    BatchGenerator = getattr(gen_mod, "BatchGenerator", None)
+    if BatchGenerator is None:
+        return False
+
+    orig_stats = BatchGenerator.stats
+    try:
+        src = inspect.getsource(orig_stats)
+    except (OSError, TypeError):
+        return False
+    # No-op once upstream guards the division.
+    if "stats.prompt_tokens / stats.prompt_time" not in src:
+        return False
+
+    @contextmanager
+    def stats(self, stats=None):
+        cm = orig_stats(self, stats)
+        st = cm.__enter__()
+        try:
+            yield st
+        except BaseException as exc:
+            # Teardown must never mask the body's real error.
+            try:
+                cm.__exit__(type(exc), exc, exc.__traceback__)
+            except ZeroDivisionError:
+                pass
+            raise
+        else:
+            try:
+                cm.__exit__(None, None, None)
+            except ZeroDivisionError:
+                # Clean zero-work exit: upstream aborted at the prompt_tps
+                # division, so recompute both tps defensively as 0.0.
+                st.prompt_tps = (
+                    st.prompt_tokens / st.prompt_time if st.prompt_time else 0.0
+                )
+                st.generation_tps = (
+                    st.generation_tokens / st.generation_time
+                    if st.generation_time
+                    else 0.0
+                )
+
+    BatchGenerator.stats = stats
+    setattr(gen_mod, _STATS_PATCH_FLAG, True)
     return True
