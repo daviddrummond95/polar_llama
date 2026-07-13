@@ -33,7 +33,6 @@ import threading
 from typing import (
     Callable,
     Dict,
-    Iterable,
     Iterator,
     List,
     Optional,
@@ -211,6 +210,29 @@ def _require_mlx() -> None:
         ) from exc
 
 
+def _apply_mlx_patches() -> None:
+    """Apply all upstream mlx-lm workarounds (issue #70) before generation.
+
+    Both patches are individually guarded, idempotent no-ops when not
+    applicable, so this is called unconditionally on the real mlx load path.
+    Best-effort: a patch is a hardening measure, never load-critical, so an
+    unexpected failure here must not prevent the model from loading.
+    """
+    from polar_llama.local._mlx_patches import (
+        apply_batchgen_stats_zerodiv_patch,
+        apply_gemma3n_batched_shared_kv_patch,
+    )
+
+    for patch in (
+        apply_gemma3n_batched_shared_kv_patch,  # mlx-lm #1384 (unpack crash / garbage)
+        apply_batchgen_stats_zerodiv_patch,  # BatchGenerator.stats masking / zerodiv
+    ):
+        try:
+            patch()
+        except Exception:  # noqa: BLE001 -- hardening must never break load
+            pass
+
+
 # ---------------------------------------------------------------------------
 # MlxBatchEngine -- the real Apple-silicon path (BLOCKED-ON-GPU / import-guarded)
 # ---------------------------------------------------------------------------
@@ -237,6 +259,9 @@ class MlxBatchEngine:
     to restore the Metal wired-memory limit -- is opt-in via
     ``POLAR_LLAMA_LOCAL_STREAMING=1`` and its per-``insert`` kwargs remain
     unverified against 0.31.3.
+
+    Upstream mlx-lm workarounds (issue #70) are applied once, in
+    ``_ensure_loaded``, before ``load()`` runs -- see :func:`_apply_mlx_patches`.
     """
 
     def __init__(
@@ -262,6 +287,10 @@ class MlxBatchEngine:
             if self._loaded:
                 return
             _require_mlx()
+            # Apply upstream mlx-lm workarounds (issue #70) before load so the
+            # gemma3n model class is patched before any weights are built and
+            # the BatchGenerator.stats guard is live before generation.
+            _apply_mlx_patches()
             from mlx_lm import load  # type: ignore
 
             self._model, self._tokenizer = load(
