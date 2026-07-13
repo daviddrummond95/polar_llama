@@ -24,7 +24,8 @@ env:
 
 jobs:
   security-audit:
-    runs-on: ubuntu-latest
+    # Blacksmith: no-artifact job, safe to run on managed runners (see PR).
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -55,7 +56,8 @@ jobs:
           safety check || true
 
   coverage:
-    runs-on: ubuntu-latest
+    # Blacksmith: no-artifact job, safe to run on managed runners (see PR).
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -109,7 +111,8 @@ jobs:
           path: coverage/
 
   linux_tests:
-    runs-on: ubuntu-latest
+    # Blacksmith: no-artifact job, safe to run on managed runners (see PR).
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       matrix:
         target: [x86_64]
