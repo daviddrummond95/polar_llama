@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-07-14
+
+### Added
+- **Inter-rater reliability metrics** (`cohens_kappa`, `krippendorffs_alpha`, issue #79): DataFrame-shaped aggregation expressions -- `df.select(kappa=cohens_kappa("llm", "human"))`, `df.group_by("topic").agg(alpha=krippendorffs_alpha(["r1", "r2", "r3"]))` -- backed by pure, unit-tested Rust (`src/metrics.rs`, zero new dependencies). `cohens_kappa(a, b, weights=None|"linear"|"quadratic")` reproduces `sklearn.metrics.cohen_kappa_score` bit-for-bit (pairwise-complete rows, sklearn's label-*index* weighting convention, and its `NaN`-not-null convention when expected-by-chance agreement is zero). `krippendorffs_alpha(cols, level="nominal"|"ordinal"|"interval"|"ratio")` reproduces the `krippendorff` PyPI package's coincidence-matrix algorithm bit-for-bit on its own published fixtures, with nulls treated as missing ratings (units with fewer than 2 non-null ratings are excluded). Both accept `n_bootstrap=`/`ci=`/`seed=` for a nonparametric case-resampling bootstrap CI, returned as `Struct{value, ci_low, ci_high}` (`.struct.unnest()`); `n_bootstrap=None` (default) returns a plain `Float64`. Available as `.llama.cohens_kappa(...)` / `.llama.krippendorffs_alpha(...)` on expressions too. This is the first aggregation-shaped plugin expression in the package (`returns_scalar=True`, new in `polar_llama/utils.py::register_plugin`), so it composes with `.select()`, `group_by().agg()`, and lazy frames for free. Multi-label/set-valued codes (MASI) are deferred -- `docs/RELIABILITY_METRICS.md` documents two supported strategies (per-label binary alpha, exact-set nominal alpha) per the issue's "or documented strategy" acceptance arm. See `docs/RELIABILITY_METRICS.md`.
+
 ## [0.7.0] - 2026-07-14
 
 ### Added

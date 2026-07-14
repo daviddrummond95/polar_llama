@@ -20,6 +20,7 @@ Complete reference documentation for all Polar Llama expressions and functions.
   - [euclidean_distance](#euclidean_distance)
   - [knn_hnsw](#knn_hnsw)
   - [embedding_async](#embedding_async)
+  - [Inter-rater Reliability (cohens_kappa, krippendorffs_alpha)](#inter-rater-reliability)
 - [Data Types](#data-types)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
@@ -1083,6 +1084,46 @@ df = df.with_columns(
         model="text-embedding-3-small"
     )
 )
+```
+
+---
+
+### Inter-rater Reliability
+
+Aggregation expressions (`returns_scalar=True`, not row-wise) for measuring
+agreement between raters/annotators/LLM judges: `cohens_kappa` (2 columns)
+and `krippendorffs_alpha` (M >= 2 columns), numerically pinned to
+`sklearn.metrics.cohen_kappa_score` and the `krippendorff` PyPI package
+respectively. Full guide, edge-case conventions, and the multi-label (MASI)
+decision: [RELIABILITY_METRICS.md](RELIABILITY_METRICS.md).
+
+```python
+cohens_kappa(
+    a: IntoExpr, b: IntoExpr, *,
+    weights: str | None = None,  # None | "linear" | "quadratic"
+    n_bootstrap: int | None = None, ci: float = 0.95, seed: int = 0,
+) -> pl.Expr
+
+krippendorffs_alpha(
+    cols: Sequence[IntoExpr], *,
+    level: str = "nominal",  # "nominal" | "ordinal" | "interval" | "ratio"
+    n_bootstrap: int | None = None, ci: float = 0.95, seed: int = 0,
+) -> pl.Expr
+```
+
+Both return `Float64` by default, or `Struct{value, ci_low, ci_high}` when
+`n_bootstrap` is given (unnest with `.struct.unnest()`). Because they are
+aggregations, they compose with `.select()` and `group_by().agg()`:
+
+```python
+df.select(kappa=cohens_kappa("llm", "human"))
+df.group_by("topic").agg(alpha=krippendorffs_alpha(["r1", "r2", "r3"]))
+```
+
+**Using .llama namespace:**
+```python
+pl.col("rater_a").llama.cohens_kappa("rater_b", weights="quadratic")
+pl.col("r1").llama.krippendorffs_alpha("r2", "r3", level="interval")
 ```
 
 ---
