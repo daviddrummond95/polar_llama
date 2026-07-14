@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-13
+
+### Fixed
+- `tag_taxonomy()` no longer fails on OpenAI (and other strict-schema providers) with `invalid_request_error: 'required' ... Extra required key 'thinking'` (#51). Two stacked OpenAI-strict-mode schema violations are fixed: (1) the per-field `thinking` reasoning is now `List[{value, reasoning}]` instead of a `Dict[str, str]` dynamic-key map (which strict mode rejects for lacking `properties`/`required`); (2) `_pydantic_to_json_schema` now strips sibling keywords from `$ref` nodes (pydantic emits taxonomy fields as `{"$ref": ..., "description": ...}`, which strict mode rejects with "$ref cannot have keywords"). Verified end-to-end with live OpenAI (`gpt-4o-mini`), Anthropic (`claude-haiku-4-5`), and Groq (`llama-4-scout`) calls. `_validate_strict_mode_schema` now also warns when a user-supplied response model uses a `Dict`-typed field.
+
 ## [0.5.2] - 2026-07-12
 
 ### Fixed
