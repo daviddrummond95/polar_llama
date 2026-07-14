@@ -52,6 +52,11 @@ local = [
     # (a <5 pin makes this extra unsatisfiable). A smoke install of 0.31.3 ran
     # batch_generate successfully against transformers>=5.
     "mlx-lm>=0.31; python_version >= '3.10'",
+    # Local embeddings (issue #83): mlx_embeddings.load/generate, wrapped by
+    # polar_llama.local.embed.MlxEmbeddingEngine. Apple-silicon-only via its
+    # own mlx dependency, same story as mlx-lm above -- never imported at
+    # `import polar_llama`/`import polar_llama.local` time.
+    "mlx-embeddings>=0.1.0; python_version >= '3.10'",
 ]
 # export_review_sample(..., format="xlsx") only -- CSV export (the default)
 # needs nothing extra. Not a required dep: xlsxwriter must stay out of the

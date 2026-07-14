@@ -507,6 +507,21 @@ df = df.with_columns(
 print(df.select(['text', 'similarity']))
 ```
 
+#### Local (Offline) Embeddings
+
+The fully-offline counterpart of `embedding_async` (issue #83): runs an embedding model **in this process** via `mlx_embeddings`, instead of calling a hosted provider API. No API key, no network call. Output dtype is `List[Float64]`, identical to `embedding_async` — a drop-in input to `cosine_similarity`, `knn_hnsw`, `HnswIndex`, and `cluster_embeddings`. See [`docs/LOCAL_EMBEDDINGS.md`](docs/LOCAL_EMBEDDINGS.md) for the full guide (download/caching, throughput numbers, the CI-safe fake-engine seam).
+
+```python
+from polar_llama import embedding_local
+
+# Requires the [local] extra on Apple Silicon: pip install "polar-llama[local]"
+# Downloads the default model (~65MB) once, cached under ~/.cache/huggingface;
+# every call after that is fully offline.
+df = df.with_columns(
+    embeddings=pl.col('text').llama.embedding_local()
+)
+```
+
 #### Vector Similarity and Approximate Nearest Neighbor Search
 
 Polar Llama includes high-performance Rust-powered vector similarity operations and approximate nearest neighbor (ANN) search capabilities for semantic search, recommendations, and clustering:
