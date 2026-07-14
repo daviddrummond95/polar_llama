@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, Union, Type, Dict, Any, List
+from typing import TYPE_CHECKING, Callable, Optional, Union, Type, Dict, Any, List
 import json
 
 import polars as pl
@@ -42,6 +42,19 @@ except ImportError:
 
             def __str__(self):
                 return self.value
+
+
+# Import the streaming pyfunction directly from the extension module. Unlike
+# the other expressions, `inference_stream` cannot go through
+# `register_plugin` (kwargs cross that boundary via serde, which cannot carry
+# a Python callable), so it calls this pyfunction from a `map_batches` UDF.
+try:
+    from .polar_llama import _stream_inference_batch
+except ImportError:
+    try:
+        from polar_llama.polar_llama import _stream_inference_batch
+    except ImportError:
+        _stream_inference_batch = None
 
 
 # Import and initialize the expressions helper to ensure expressions are registered
@@ -778,6 +791,139 @@ def inference_messages(
     return result_expr
 
 
+# ============================================================================
+# Streaming Inference
+# ============================================================================
+
+#: DataFrame-only streaming output dtype: a single self-describing struct
+#: column so the DataFrame stays rectangular even after cancellation.
+#: `finished=True` means a terminator was seen ("[DONE]" / `message_stop`, or
+#: the buffered-fallback path used by providers with no native SSE support).
+#: `finished=False` means the stream was cut off (callback raised, Ctrl-C, a
+#: mid-stream provider `error` event, a transport drop, or EOF without a
+#: terminator) -- `text` holds whatever partial content arrived, possibly "".
+STREAM_RESPONSE_DTYPE = pl.Struct({"text": pl.Utf8, "finished": pl.Boolean})
+
+
+def inference_stream(
+    expr: IntoExpr,
+    *,
+    provider: Optional[Union[str, Provider]] = None,
+    model: Optional[str] = None,
+    on_token: Optional[Callable[[int, str], None]] = None,
+    messages: bool = False,
+    response_model: Optional[Type["BaseModel"]] = None,
+    response_format: Optional[Type["BaseModel"]] = None,
+) -> pl.Expr:
+    """
+    Stream completions token-by-token for the given text expressions.
+
+    Unlike ``inference_async``, this is a text-only, DataFrame-oriented
+    streaming API: there is no Python iterator. Instead, each row's stream is
+    driven to completion (or cancellation) internally, with an optional
+    ``on_token`` callback invoked for every delta as it arrives, and the final
+    per-row result returned as a ``Struct{text: Utf8, finished: Boolean}``
+    (``STREAM_RESPONSE_DTYPE``) column -- so the DataFrame stays rectangular
+    and consistent even when a row's stream is cut off.
+
+    Parameters
+    ----------
+    expr : polars.Expr
+        The text expression to use for inference (or JSON message arrays,
+        with ``messages=True``).
+    provider : str or Provider, optional
+        The provider to use (OpenAI, Anthropic, Gemini, Groq, Bedrock).
+        Gemini and Bedrock do not have a native streaming transport wired up
+        here; they fall back to one full-text delta followed by completion.
+    model : str, optional
+        The model name to use.
+    on_token : callable, optional
+        ``on_token(row_index, delta)``, called for every text delta as it
+        arrives. ``row_index`` is the index *within the batch this pyfunction
+        call executes*, which equals the column index under the default
+        ``collect()`` engine, but may restart from 0 per batch under the
+        streaming/new-streaming engine. If the callback raises, that row's
+        stream is cancelled (see Cancellation below); no exception ever
+        propagates out of the expression.
+    messages : bool, optional
+        When True, each row is a JSON-encoded message array (as produced by
+        ``string_to_message`` / ``combine_messages``) instead of a bare user
+        message string.
+    response_model, response_format : optional
+        Not supported by streaming. Passing either raises ``ValueError``
+        immediately -- use ``inference_async`` for structured output.
+
+    Returns
+    -------
+    polars.Expr
+        Expression of dtype ``STREAM_RESPONSE_DTYPE``
+        (``Struct{text: Utf8, finished: Boolean}``). A null input row produces
+        a null struct row.
+
+    Cancellation
+    ------------
+    If the ``on_token`` callback raises, or the user presses Ctrl-C (only
+    detected on the main Python thread), in-flight streams are aborted and the
+    call returns normally with a ``RuntimeWarning``: unfinished rows come back
+    with whatever partial text had arrived and ``finished=False``. The
+    DataFrame's height and schema are always intact -- streaming never raises
+    the callback's exception or a ``KeyboardInterrupt`` out of the expression.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from polar_llama import inference_stream
+    >>>
+    >>> df = pl.DataFrame({"prompt": ["Tell me a joke", "Say hi"]})
+    >>> result = df.with_columns(
+    ...     response=inference_stream(
+    ...         pl.col("prompt"),
+    ...         on_token=lambda i, d: print(d, end=""),
+    ...     )
+    ... )
+    >>> result.select(
+    ...     pl.col("response").struct.field("text"),
+    ...     pl.col("response").struct.field("finished"),
+    ... )
+    """
+    if response_model is not None or response_format is not None:
+        raise ValueError(
+            "inference_stream is text-only: response_model is not supported; "
+            "use inference_async for structured output"
+        )
+
+    if _stream_inference_batch is None:
+        raise ImportError(
+            "_stream_inference_batch could not be imported from the polar_llama "
+            "native extension; inference_stream is unavailable. Did the build "
+            "succeed?"
+        )
+
+    expr = parse_into_expr(expr)
+
+    if provider is not None and not isinstance(provider, str):
+        provider_str = (
+            provider.as_str() if hasattr(provider, "as_str") else str(provider)
+        )
+    else:
+        provider_str = provider
+
+    def _udf(s: pl.Series) -> pl.Series:
+        texts, finished = _stream_inference_batch(
+            s.to_list(), provider_str, model, on_token, messages
+        )
+        return pl.Series(
+            s.name,
+            [
+                None if t is None else {"text": t, "finished": f}
+                for t, f in zip(texts, finished)
+            ],
+            dtype=STREAM_RESPONSE_DTYPE,
+        )
+
+    return expr.map_batches(_udf, return_dtype=STREAM_RESPONSE_DTYPE)
+
+
 def string_to_message(expr: IntoExpr, *, message_type: str) -> pl.Expr:
     """
     Convert a string to a message with the specified type.
@@ -1377,6 +1523,26 @@ class LlamaNamespace:
             response_model=response_model or response_format,
             cache=cache,
             system_prompt=system_prompt,
+        )
+
+    def inference_stream(
+        self,
+        *,
+        provider: Optional[Union[str, Provider]] = None,
+        model: Optional[str] = None,
+        on_token: Optional[Callable[[int, str], None]] = None,
+        messages: bool = False,
+    ) -> pl.Expr:
+        """
+        Stream completions token-by-token for the expression.
+        See ``polar_llama.inference_stream``.
+        """
+        return inference_stream(
+            self._expr,
+            provider=provider,
+            model=model,
+            on_token=on_token,
+            messages=messages,
         )
 
     def inference_local(

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-13
+
+### Added
+- **Streaming inference** (`inference_stream()`, issue #74): stream completions token-by-token with an `on_token(row_index, delta)` callback, returning a DataFrame-only `Struct{text: Utf8, finished: Boolean}` column (`STREAM_RESPONSE_DTYPE`) so the DataFrame stays rectangular even when a stream is cut off. `finished=False` covers every non-terminal outcome: a mid-stream provider `error` event, a transport drop, EOF without a completion marker, an `on_token` callback that raises, or Ctrl-C — all of these are reported as a `RuntimeWarning` with partial text returned rather than an exception propagating out of the expression. Native SSE parsing for OpenAI, Groq (OpenAI-compatible), and Anthropic; Gemini and Bedrock stream via a buffered fallback (one full-text delta then completion). `response_model`/`response_format` are rejected immediately with a clear `ValueError` — streaming is text-only.
+- `GROQ_BASE_URL` environment variable override for the Groq endpoint, matching the existing `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` pattern (also needed so streaming's mock-server tests can point Groq at a local server).
+- `reqwest`'s `stream` feature, enabling chunked body streaming (`bytes_stream()`) for the new SSE drivers.
+
 ## [0.5.3] - 2026-07-13
 
 ### Fixed

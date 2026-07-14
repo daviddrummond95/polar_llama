@@ -1,8 +1,10 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
 use super::{ModelClient, ModelClientError, Message, Provider};
+use super::streaming::{self, SseFrame, StreamEvent};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
+use tokio::sync::mpsc::Sender;
 
 /// Default Anthropic model
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-opus-4-8";
@@ -210,8 +212,56 @@ impl ModelClient for AnthropicClient {
         let body = self.format_request_body(messages, schema, model_name);
 
         let mut request = self.apply_auth(client.post(self.api_endpoint()), &api_key);
+        request = self.apply_cache_beta_headers(request, messages);
 
-        // Prompt-caching beta header(s); extended (1h) TTL needs the extra beta.
+        let response = request.json(&body).send().await?;
+        let status = response.status();
+        let text = response.text().await?;
+        if status.is_success() {
+            self.parse_response(&text)
+        } else {
+            Err(ModelClientError::Http(status.as_u16(), text))
+        }
+    }
+
+    async fn send_request_streaming(
+        &self,
+        client: &Client,
+        messages: &[Message],
+        row: usize,
+        tx: &Sender<(usize, StreamEvent)>,
+    ) -> Result<(), ModelClientError> {
+        let api_key = self.get_api_key();
+        let mut body = self.format_request_body(messages, None, None);
+        body["stream"] = json!(true);
+
+        let mut request = self.apply_auth(client.post(self.api_endpoint()), &api_key);
+        request = self.apply_cache_beta_headers(request, messages);
+
+        let response = request.json(&body).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(ModelClientError::Http(status.as_u16(), text));
+        }
+
+        streaming::drive_sse_stream(response, row, tx, |frame: &SseFrame| {
+            streaming::anthropic_frame_to_event(frame)
+        })
+        .await;
+        Ok(())
+    }
+}
+
+impl AnthropicClient {
+    /// Attach the prompt-caching beta header(s) when any message carries a
+    /// `cache_control` marker; extended (1h) TTL needs the extra beta flag.
+    /// Shared by the structured and streaming request paths.
+    fn apply_cache_beta_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+        messages: &[Message],
+    ) -> reqwest::RequestBuilder {
         if messages.iter().any(|msg| msg.cache_control.is_some()) {
             let needs_extended_ttl = messages.iter().any(|msg| {
                 msg.cache_control.as_ref().and_then(|cc| cc.ttl.as_deref()) == Some("1h")
@@ -221,16 +271,9 @@ impl ModelClient for AnthropicClient {
             } else {
                 "prompt-caching-2024-07-31"
             };
-            request = request.header("anthropic-beta", beta);
-        }
-
-        let response = request.json(&body).send().await?;
-        let status = response.status();
-        let text = response.text().await?;
-        if status.is_success() {
-            self.parse_response(&text)
+            request.header("anthropic-beta", beta)
         } else {
-            Err(ModelClientError::Http(status.as_u16(), text))
+            request
         }
     }
 }

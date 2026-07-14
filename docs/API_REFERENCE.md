@@ -11,6 +11,7 @@ Complete reference documentation for all Polar Llama expressions and functions.
   - [inference](#inference)
   - [inference_async](#inference_async)
   - [inference_messages](#inference_messages)
+  - [inference_stream](#inference_stream)
   - [string_to_message](#string_to_message)
   - [combine_messages](#combine_messages)
   - [tag_taxonomy](#tag_taxonomy)
@@ -412,6 +413,69 @@ df = df.with_columns(
 - Maintains conversation context across multiple turns
 - Each row can have a different conversation history
 - Messages must be valid JSON
+
+---
+
+### inference_stream
+
+Stream completions token-by-token, with the final per-row result still returned as a plain DataFrame column (no separate iterator). This is a text-only API: `response_model` / `response_format` are rejected immediately.
+
+**Signature:**
+```python
+STREAM_RESPONSE_DTYPE = pl.Struct({"text": pl.Utf8, "finished": pl.Boolean})
+
+def inference_stream(
+    expr: IntoExpr,
+    *,
+    provider: Optional[Union[str, Provider]] = None,
+    model: Optional[str] = None,
+    on_token: Optional[Callable[[int, str], None]] = None,
+    messages: bool = False,
+    response_model: Optional[Type[BaseModel]] = None,
+    response_format: Optional[Type[BaseModel]] = None,
+) -> pl.Expr
+```
+
+**Parameters:**
+- `expr` (IntoExpr): The text expression to use for inference (or JSON message arrays, with `messages=True`)
+- `provider` (str | Provider, optional): The LLM provider to use. Defaults to `Provider.OPENAI`. Gemini and Bedrock have no native SSE transport wired up and stream via a buffered fallback (one full-text delta, then completion)
+- `model` (str, optional): The specific model name
+- `on_token` (callable, optional): `on_token(row_index, delta)`, invoked for every text delta as it arrives. `row_index` is the index within the batch this call executes — equal to the column index under the default `collect()` engine, but may restart from 0 per batch under the streaming/new-streaming engine
+- `messages` (bool, optional): When `True`, each row is a JSON-encoded message array instead of a bare user message string
+- `response_model` / `response_format`: Not supported — passing either raises `ValueError` immediately
+
+**Returns:**
+- `pl.Expr`: Expression of dtype `STREAM_RESPONSE_DTYPE` (`Struct{text: Utf8, finished: Boolean}`). A null input row produces a null struct row.
+
+**`finished` semantics:**
+- `finished=True`: the stream reached a clean terminator (`[DONE]` for OpenAI/Groq, `message_stop` for Anthropic, or the buffered-fallback path)
+- `finished=False`: the stream was cut off — a mid-stream provider `error` event, a transport drop, EOF without a terminator, an `on_token` callback that raised, or Ctrl-C. `text` holds whatever partial content had arrived (possibly `""`)
+
+**Cancellation:** if `on_token` raises, or the user presses Ctrl-C (only detected on the main Python thread), in-flight streams for the batch are aborted and the call returns normally with a `RuntimeWarning` — unfinished rows come back with their partial text and `finished=False`. No exception (including `KeyboardInterrupt`) ever propagates out of the expression; the DataFrame's height and schema are always intact.
+
+**Example:**
+```python
+import polars as pl
+from polar_llama import inference_stream, Provider
+
+df = pl.DataFrame({
+    'prompt': ["Tell me a short joke", "Say hello in French"]
+})
+
+df = df.with_columns(
+    response=inference_stream(
+        pl.col('prompt'),
+        provider=Provider.OPENAI,
+        model='gpt-4o-mini',
+        on_token=lambda i, d: print(d, end=""),
+    )
+)
+
+print(df.select(
+    pl.col('response').struct.field('text'),
+    pl.col('response').struct.field('finished'),
+))
+```
 
 ---
 

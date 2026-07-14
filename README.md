@@ -197,6 +197,35 @@ if error:
     print(f"Raw response: {df['recommendation'].struct.field('_raw')[0]}")
 ```
 
+#### Streaming Responses
+
+`inference_stream()` streams completions token-by-token via an `on_token(row_index, delta)` callback, while still returning a plain DataFrame column — there's no separate iterator to manage. Each row's result is a `Struct{text: Utf8, finished: Boolean}`: `finished=True` means the stream completed normally; `finished=False` covers any interruption (a provider error mid-stream, a dropped connection, Ctrl-C, or an `on_token` callback that raises) and comes with a `RuntimeWarning` plus whatever partial text had arrived — the DataFrame itself is never left in a broken state.
+
+```python
+import polars as pl
+from polar_llama import inference_stream, Provider
+
+df = pl.DataFrame({
+    'prompt': ["Tell me a short joke", "Say hello in French"]
+})
+
+df = df.with_columns(
+    response=inference_stream(
+        pl.col('prompt'),
+        provider=Provider.OPENAI,
+        model='gpt-4o-mini',
+        on_token=lambda i, d: print(d, end=""),
+    )
+)
+
+print(df.select(
+    pl.col('response').struct.field('text'),
+    pl.col('response').struct.field('finished'),
+))
+```
+
+Streaming is text-only: pass `response_model` and you'll get a clear `ValueError` telling you to use `inference_async()` for structured output instead. OpenAI, Groq, and Anthropic stream natively over SSE; Gemini and Bedrock fall back to a single "full response, then done" delta so every provider works with the same API.
+
 #### Local Inference (Apple Silicon / MLX)
 
 Run inference **on-device** on Apple Silicon instead of a provider API — no keys, no network — via [mlx-lm](https://github.com/ml-explore/mlx-lm). Install the extra (Apple Silicon, Python ≥ 3.10):
@@ -580,4 +609,4 @@ Polar Llama is released under the MIT license. For more details, see the LICENSE
 - [x] **Multiple Provider Support**: Support for different LLM providers (OpenAI, Anthropic, Gemini, Groq, AWS Bedrock).
 - [x] **Structured Data Outputs**: Add support for structured data outputs using Pydantic models with type validation and Polars Struct returns.
 - [x] **Tool Use / MCP**: Batch-parallel tool-call emission and execution with MCP support (see [docs/TOOL_USE.md](docs/TOOL_USE.md)).
-- [ ] **Streaming Responses**: Support for streaming responses from LLM providers.
+- [x] **Streaming Responses**: Support for streaming responses from LLM providers (`inference_stream()`, see above).
