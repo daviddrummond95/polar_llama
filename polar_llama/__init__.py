@@ -1962,6 +1962,16 @@ from polar_llama.codebook import (
 
 
 # ============================================================================
+# Inter-rater Reliability (issue #79) — see docs/RELIABILITY_METRICS.md
+# ============================================================================
+
+from polar_llama.reliability import (
+    cohens_kappa,
+    krippendorffs_alpha,
+)
+
+
+# ============================================================================
 # Tool Use (MCP) — see docs/design/MCP_TOOL_INTEGRATION.md
 # ============================================================================
 
@@ -2263,6 +2273,66 @@ class LlamaNamespace:
             Cosine similarity score
         """
         return cosine_similarity(self._expr, other)
+
+    def cohens_kappa(
+        self,
+        other: IntoExpr,
+        *,
+        weights: Optional[str] = None,
+        n_bootstrap: Optional[int] = None,
+        ci: float = 0.95,
+        seed: int = 0,
+    ) -> pl.Expr:
+        """
+        Cohen's kappa between this column and another column of ratings.
+
+        See `polar_llama.cohens_kappa` for the full parameter/return docs.
+
+        Parameters
+        ----------
+        other : polars.Expr
+            The other column of categorical ratings to compare with.
+
+        Returns
+        -------
+        polars.Expr
+            `Float64` kappa (or `Struct{value, ci_low, ci_high}` when
+            `n_bootstrap` is given).
+        """
+        return cohens_kappa(
+            self._expr, other, weights=weights, n_bootstrap=n_bootstrap, ci=ci, seed=seed
+        )
+
+    def krippendorffs_alpha(
+        self,
+        *others: IntoExpr,
+        level: str = "nominal",
+        n_bootstrap: Optional[int] = None,
+        ci: float = 0.95,
+        seed: int = 0,
+    ) -> pl.Expr:
+        """
+        Krippendorff's alpha across this column and one or more other
+        rater columns.
+
+        See `polar_llama.krippendorffs_alpha` for the full parameter/return
+        docs.
+
+        Parameters
+        ----------
+        *others : polars.Expr
+            The other rater columns (at least one, so at least 2 raters
+            total).
+
+        Returns
+        -------
+        polars.Expr
+            `Float64` alpha (or `Struct{value, ci_low, ci_high}` when
+            `n_bootstrap` is given).
+        """
+        return krippendorffs_alpha(
+            [self._expr, *others], level=level, n_bootstrap=n_bootstrap, ci=ci, seed=seed
+        )
 
     def dot_product(self, other: IntoExpr) -> pl.Expr:
         """

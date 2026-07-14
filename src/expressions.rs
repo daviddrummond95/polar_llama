@@ -1423,3 +1423,427 @@ fn calculate_cost_from_tokens(inputs: &[Series], kwargs: CostKwargs) -> PolarsRe
 
     Ok(out.into_series())
 }
+
+// ============================================================================
+// Inter-rater reliability (issue #79)
+// ============================================================================
+//
+// Cohen's kappa (`cohens_kappa` / `cohens_kappa_ci`) and Krippendorff's alpha
+// (`krippendorffs_alpha` / `krippendorffs_alpha_ci`) are *aggregations*, not
+// row-wise transforms: they reduce a whole column (or, inside
+// `group_by().agg()`, a whole group) down to a single number. They are
+// registered from the Python side with `returns_scalar=True`
+// (`polar_llama/utils.py::register_plugin`), which is why every function
+// below always returns a length-1 `Series` regardless of the input length.
+//
+// The pure numeric algorithms (confusion-matrix kappa, coincidence-matrix
+// alpha, case-resampling bootstrap) live in `crate::metrics` and are unit
+// tested there against published reference fixtures; this section only does
+// the Polars/`Series` <-> plain-Rust-vector plumbing: pairwise-complete
+// filtering, categorical label encoding, and building the
+// `Struct{value, ci_low, ci_high}` output for the `_ci` variants.
+//
+// `output_type_func` cannot see kwargs, so a bootstrap request needs a
+// different return dtype (`Float64` vs `Struct`) from a plain point
+// estimate -- hence two Rust symbols per metric, dispatched on the Python
+// side by whether `n_bootstrap` is `None` (see `polar_llama/reliability.py`).
+
+fn default_irr_ci() -> f64 {
+    0.95
+}
+
+/// A single rater's category value, used only to build the sorted label
+/// list Cohen's kappa weights are indexed over. Numeric dtypes sort
+/// numerically; string-like dtypes (`String`/`Categorical`/`Enum`, the
+/// latter two cast to `String` first) sort lexicographically -- matching
+/// `np.unique` on the concatenation of both columns, same as sklearn.
+#[derive(Clone)]
+enum LabelValue {
+    Num(f64),
+    Str(String),
+}
+
+impl LabelValue {
+    fn cmp_key(&self, other: &LabelValue) -> std::cmp::Ordering {
+        match (self, other) {
+            (LabelValue::Num(a), LabelValue::Num(b)) => a.total_cmp(b),
+            (LabelValue::Str(a), LabelValue::Str(b)) => a.cmp(b),
+            // Mixed numeric/string columns aren't a documented case; sort
+            // numeric labels before string labels rather than panicking.
+            (LabelValue::Num(_), LabelValue::Str(_)) => std::cmp::Ordering::Less,
+            (LabelValue::Str(_), LabelValue::Num(_)) => std::cmp::Ordering::Greater,
+        }
+    }
+}
+
+fn is_numeric_dtype(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
+    )
+}
+
+fn is_string_like_dtype(dt: &DataType) -> bool {
+    dt.is_string() || dt.is_categorical() || dt.is_enum()
+}
+
+fn series_to_label_values(s: &Series) -> PolarsResult<Vec<Option<LabelValue>>> {
+    if is_string_like_dtype(s.dtype()) {
+        let casted = s.cast(&DataType::String)?;
+        let ca = casted.str()?;
+        Ok(ca
+            .into_iter()
+            .map(|opt| opt.map(|v| LabelValue::Str(v.to_string())))
+            .collect())
+    } else {
+        let casted = s.cast(&DataType::Float64)?;
+        let ca = casted.f64()?;
+        // Treat NaN/inf as missing (consistent with krippendorffs_alpha and the
+        // pairwise-complete contract) rather than as a distinct label value.
+        Ok(ca
+            .into_iter()
+            .map(|opt| opt.filter(|v| v.is_finite()).map(LabelValue::Num))
+            .collect())
+    }
+}
+
+/// Pairwise-complete label encoding for Cohen's kappa: drops row `i` if
+/// either column is null there, builds the sorted-union label list, and
+/// returns each surviving row re-expressed as indices into that list (plus
+/// the label count). `n_labels == 0` means zero pairwise-complete rows.
+fn encode_pairwise_complete_labels(
+    a: &Series,
+    b: &Series,
+) -> PolarsResult<(Vec<usize>, Vec<usize>, usize)> {
+    let a_vals = series_to_label_values(a)?;
+    let b_vals = series_to_label_values(b)?;
+    let n = a_vals.len().min(b_vals.len());
+
+    let mut rows: Vec<(LabelValue, LabelValue)> = Vec::new();
+    for i in 0..n {
+        if let (Some(av), Some(bv)) = (&a_vals[i], &b_vals[i]) {
+            rows.push((av.clone(), bv.clone()));
+        }
+    }
+
+    let mut domain: Vec<LabelValue> = Vec::with_capacity(rows.len() * 2);
+    for (av, bv) in &rows {
+        domain.push(av.clone());
+        domain.push(bv.clone());
+    }
+    domain.sort_by(|x, y| x.cmp_key(y));
+    domain.dedup_by(|x, y| x.cmp_key(y) == std::cmp::Ordering::Equal);
+
+    let label_index = |domain: &[LabelValue], v: &LabelValue| -> usize {
+        domain
+            .binary_search_by(|x| x.cmp_key(v))
+            .expect("label value must be present in its own domain")
+    };
+
+    let mut a_idx = Vec::with_capacity(rows.len());
+    let mut b_idx = Vec::with_capacity(rows.len());
+    for (av, bv) in &rows {
+        a_idx.push(label_index(&domain, av));
+        b_idx.push(label_index(&domain, bv));
+    }
+
+    Ok((a_idx, b_idx, domain.len()))
+}
+
+fn parse_kappa_weights(w: &Option<String>) -> PolarsResult<crate::metrics::KappaWeights> {
+    match w.as_deref() {
+        None => Ok(crate::metrics::KappaWeights::None),
+        Some("linear") => Ok(crate::metrics::KappaWeights::Linear),
+        Some("quadratic") => Ok(crate::metrics::KappaWeights::Quadratic),
+        Some(other) => Err(PolarsError::ComputeError(
+            format!("cohens_kappa: unknown weights {other:?} (expected 'linear' or 'quadratic')")
+                .into(),
+        )),
+    }
+}
+
+fn parse_alpha_level(level: &str) -> PolarsResult<crate::metrics::AlphaLevel> {
+    match level {
+        "nominal" => Ok(crate::metrics::AlphaLevel::Nominal),
+        "ordinal" => Ok(crate::metrics::AlphaLevel::Ordinal),
+        "interval" => Ok(crate::metrics::AlphaLevel::Interval),
+        "ratio" => Ok(crate::metrics::AlphaLevel::Ratio),
+        other => Err(PolarsError::ComputeError(
+            format!(
+                "krippendorffs_alpha: unknown level {other:?} \
+                 (expected 'nominal', 'ordinal', 'interval', or 'ratio')"
+            )
+            .into(),
+        )),
+    }
+}
+
+/// Builds Krippendorff's-alpha "units": one `Vec<f64>` per row, holding that
+/// row's non-null ratings across the `M` rater columns in `inputs`.
+///
+/// `level == Nominal` accepts numeric or string-like (`String`/
+/// `Categorical`/`Enum`) columns; string-like values are encoded to
+/// arbitrary-but-consistent `f64` ids (order doesn't matter -- nominal's
+/// difference function only tests equality). `Ordinal`/`Interval`/`Ratio`
+/// require every column to already be numeric (raised as `ComputeError`
+/// otherwise -- matches the `krippendorff` package, which needs numeric
+/// values to compute a numeric difference for those levels).
+fn build_reliability_units(
+    inputs: &[Series],
+    level: crate::metrics::AlphaLevel,
+) -> PolarsResult<Vec<Vec<f64>>> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n_rows = inputs[0].len();
+
+    let use_string_encoding = matches!(level, crate::metrics::AlphaLevel::Nominal)
+        && inputs.iter().any(|s| is_string_like_dtype(s.dtype()));
+
+    if !matches!(level, crate::metrics::AlphaLevel::Nominal) {
+        for s in inputs {
+            if !is_numeric_dtype(s.dtype()) {
+                return Err(PolarsError::ComputeError(
+                    format!(
+                        "krippendorffs_alpha: level={level:?} requires numeric rater columns, \
+                         got column {:?} with dtype {:?}",
+                        s.name(),
+                        s.dtype()
+                    )
+                    .into(),
+                ));
+            }
+        }
+    }
+
+    let mut columns: Vec<Vec<Option<f64>>> = Vec::with_capacity(inputs.len());
+    if use_string_encoding {
+        let mut ids: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        let mut next_id = 0f64;
+        for s in inputs {
+            let casted = s.cast(&DataType::String)?;
+            let ca = casted.str()?;
+            let mut col: Vec<Option<f64>> = Vec::with_capacity(ca.len());
+            for v in ca.into_iter() {
+                col.push(v.map(|text| {
+                    *ids.entry(text.to_string()).or_insert_with(|| {
+                        let id = next_id;
+                        next_id += 1.0;
+                        id
+                    })
+                }));
+            }
+            columns.push(col);
+        }
+    } else {
+        for s in inputs {
+            let casted = s.cast(&DataType::Float64)?;
+            let ca = casted.f64()?;
+            columns.push(ca.into_iter().collect());
+        }
+    }
+
+    let mut units: Vec<Vec<f64>> = Vec::with_capacity(n_rows);
+    for row in 0..n_rows {
+        let mut ratings = Vec::with_capacity(columns.len());
+        for col in &columns {
+            if row < col.len() {
+                if let Some(v) = col[row] {
+                    // Treat NaN/inf as missing (matches the reference
+                    // `krippendorff` package and the null-as-missing contract);
+                    // a non-finite value would otherwise poison the domain sort.
+                    if v.is_finite() {
+                        ratings.push(v);
+                    }
+                }
+            }
+        }
+        units.push(ratings);
+    }
+    Ok(units)
+}
+
+/// `Struct{value: Float64, ci_low: Float64, ci_high: Float64}` -- the
+/// `output_type_func` for the `_ci` plugin variants. Built natively with
+/// `StructChunked` (the `dtype-struct` Cargo feature is already enabled),
+/// not the JSON-string decode convention `cluster_embeddings` uses: a
+/// `returns_scalar` aggregation composes awkwardly with `map_batches`
+/// inside `.agg()`.
+fn irr_ci_output_type(_input_fields: &[Field]) -> PolarsResult<Field> {
+    Ok(Field::new(
+        PlSmallStr::from_static(""),
+        DataType::Struct(vec![
+            Field::new(PlSmallStr::from_static("value"), DataType::Float64),
+            Field::new(PlSmallStr::from_static("ci_low"), DataType::Float64),
+            Field::new(PlSmallStr::from_static("ci_high"), DataType::Float64),
+        ]),
+    ))
+}
+
+fn build_irr_struct(
+    value: Option<f64>,
+    ci_low: Option<f64>,
+    ci_high: Option<f64>,
+) -> PolarsResult<Series> {
+    let value_s =
+        Float64Chunked::from_slice_options(PlSmallStr::from_static("value"), &[value]).into_series();
+    let ci_low_s =
+        Float64Chunked::from_slice_options(PlSmallStr::from_static("ci_low"), &[ci_low]).into_series();
+    let ci_high_s =
+        Float64Chunked::from_slice_options(PlSmallStr::from_static("ci_high"), &[ci_high])
+            .into_series();
+    let out = StructChunked::from_series(
+        PlSmallStr::from_static(""),
+        1,
+        [value_s, ci_low_s, ci_high_s].iter(),
+    )?;
+    Ok(out.into_series())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KappaKwargs {
+    #[serde(default)]
+    weights: Option<String>,
+    #[serde(default)]
+    n_bootstrap: Option<usize>,
+    #[serde(default = "default_irr_ci")]
+    ci: f64,
+    #[serde(default)]
+    seed: u64,
+}
+
+/// Cohen's kappa point estimate between two rater columns (`inputs[0]`,
+/// `inputs[1]`). Pairwise-complete: a row is dropped if either column is
+/// null there. Returns Polars null for zero pairwise-complete rows, and
+/// `f64::NAN` (not null) when expected-by-chance agreement is zero (e.g. a
+/// single observed category) -- matching
+/// `sklearn.metrics.cohen_kappa_score`'s `0/0 -> nan` convention exactly.
+#[polars_expr(output_type=Float64)]
+fn cohens_kappa(inputs: &[Series], kwargs: KappaKwargs) -> PolarsResult<Series> {
+    let weights = parse_kappa_weights(&kwargs.weights)?;
+    let (a_idx, b_idx, n_labels) = encode_pairwise_complete_labels(&inputs[0], &inputs[1])?;
+
+    let value = if n_labels == 0 {
+        None
+    } else {
+        Some(crate::metrics::cohens_kappa(&a_idx, &b_idx, n_labels, weights))
+    };
+
+    Ok(Float64Chunked::from_slice_options(PlSmallStr::from_static(""), &[value]).into_series())
+}
+
+/// Cohen's kappa with an optional case-resampling bootstrap CI. Returns
+/// `Struct{value, ci_low, ci_high}`; `ci_low`/`ci_high` are null when
+/// `n_bootstrap` is `None` or zero, or when more than half the resamples
+/// were degenerate (see `crate::metrics::bootstrap_ci`).
+#[polars_expr(output_type_func=irr_ci_output_type)]
+fn cohens_kappa_ci(inputs: &[Series], kwargs: KappaKwargs) -> PolarsResult<Series> {
+    let weights = parse_kappa_weights(&kwargs.weights)?;
+    let (a_idx, b_idx, n_labels) = encode_pairwise_complete_labels(&inputs[0], &inputs[1])?;
+
+    if n_labels == 0 {
+        return build_irr_struct(None, None, None);
+    }
+
+    let point = crate::metrics::cohens_kappa(&a_idx, &b_idx, n_labels, weights);
+    let n = a_idx.len();
+    let b = kwargs.n_bootstrap.unwrap_or(0);
+
+    let (ci_low, ci_high) = if b > 0 {
+        match crate::metrics::bootstrap_ci(
+            |idx: &[usize]| {
+                let ra: Vec<usize> = idx.iter().map(|&i| a_idx[i]).collect();
+                let rb: Vec<usize> = idx.iter().map(|&i| b_idx[i]).collect();
+                crate::metrics::cohens_kappa(&ra, &rb, n_labels, weights)
+            },
+            n,
+            b,
+            kwargs.ci,
+            kwargs.seed,
+        ) {
+            Some((lo, hi)) => (Some(lo), Some(hi)),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    build_irr_struct(Some(point), ci_low, ci_high)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AlphaKwargs {
+    #[serde(default = "default_alpha_level")]
+    level: String,
+    #[serde(default)]
+    n_bootstrap: Option<usize>,
+    #[serde(default = "default_irr_ci")]
+    ci: f64,
+    #[serde(default)]
+    seed: u64,
+}
+
+fn default_alpha_level() -> String {
+    "nominal".to_string()
+}
+
+/// Krippendorff's alpha point estimate over `M` rater columns (`inputs`).
+/// Nulls are missing ratings (alpha's whole reason for being); units
+/// (rows) with fewer than 2 non-null ratings are excluded. Returns Polars
+/// null when no unit has >= 2 ratings (the reference package raises there);
+/// returns `1.0` for a single-category domain (trivially perfect
+/// agreement; the reference package also raises there) -- both documented
+/// divergences, see `crate::metrics::krippendorff_alpha`.
+#[polars_expr(output_type=Float64)]
+fn krippendorffs_alpha(inputs: &[Series], kwargs: AlphaKwargs) -> PolarsResult<Series> {
+    let level = parse_alpha_level(&kwargs.level)?;
+    let units = build_reliability_units(inputs, level)?;
+    let value = crate::metrics::krippendorff_alpha(&units, level);
+    Ok(Float64Chunked::from_slice_options(PlSmallStr::from_static(""), &[value]).into_series())
+}
+
+/// Krippendorff's alpha with an optional case (unit) bootstrap CI. Returns
+/// `Struct{value, ci_low, ci_high}`, same null/degenerate conventions as
+/// `cohens_kappa_ci`.
+#[polars_expr(output_type_func=irr_ci_output_type)]
+fn krippendorffs_alpha_ci(inputs: &[Series], kwargs: AlphaKwargs) -> PolarsResult<Series> {
+    let level = parse_alpha_level(&kwargs.level)?;
+    let units = build_reliability_units(inputs, level)?;
+
+    let value = match crate::metrics::krippendorff_alpha(&units, level) {
+        Some(v) => v,
+        None => return build_irr_struct(None, None, None),
+    };
+
+    let n = units.len();
+    let b = kwargs.n_bootstrap.unwrap_or(0);
+
+    let (ci_low, ci_high) = if b > 0 {
+        match crate::metrics::bootstrap_ci(
+            |idx: &[usize]| {
+                let resampled: Vec<Vec<f64>> = idx.iter().map(|&i| units[i].clone()).collect();
+                crate::metrics::krippendorff_alpha(&resampled, level).unwrap_or(f64::NAN)
+            },
+            n,
+            b,
+            kwargs.ci,
+            kwargs.seed,
+        ) {
+            Some((lo, hi)) => (Some(lo), Some(hi)),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    build_irr_struct(Some(value), ci_low, ci_high)
+}
