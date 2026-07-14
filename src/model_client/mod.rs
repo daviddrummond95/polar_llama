@@ -3,6 +3,9 @@ pub mod anthropic;
 pub mod gemini;
 pub mod groq;
 pub mod bedrock;
+pub mod streaming;
+
+pub use streaming::{StreamEvent, stream_batch};
 
 use reqwest::Client;
 use std::error::Error;
@@ -236,6 +239,23 @@ pub trait ModelClient {
             Provider::Groq => std::env::var("GROQ_API_KEY").unwrap_or_default(),
             Provider::Bedrock => String::new(), // Bedrock uses AWS credentials
         }
+    }
+
+    /// Streaming send: emits `StreamEvent`s for this row over `tx` as they
+    /// arrive. Default implementation is a buffered fallback so providers
+    /// without a native SSE override (Gemini, Bedrock) still work: it awaits
+    /// the full response and emits a single `Delta` followed by `Done`.
+    async fn send_request_streaming(
+        &self,
+        client: &Client,
+        messages: &[Message],
+        row: usize,
+        tx: &tokio::sync::mpsc::Sender<(usize, streaming::StreamEvent)>,
+    ) -> Result<(), ModelClientError> {
+        let text = self.send_request(client, messages).await?;
+        let _ = tx.send((row, streaming::StreamEvent::Delta(text))).await;
+        let _ = tx.send((row, streaming::StreamEvent::Done)).await;
+        Ok(())
     }
 }
 

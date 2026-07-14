@@ -1,7 +1,10 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
 use super::{ModelClient, ModelClientError, Message, Provider};
+use super::streaming::{self, StreamEvent};
 use serde::Deserialize;
+use reqwest::Client;
+use tokio::sync::mpsc::Sender;
 
 /// Default Groq model (llama3-70b-8192 was decommissioned by Groq)
 pub const DEFAULT_GROQ_MODEL: &str = "llama-3.3-70b-versatile";
@@ -54,7 +57,9 @@ impl ModelClient for GroqClient {
     }
 
     fn api_endpoint(&self) -> String {
-        "https://api.groq.com/openai/v1/chat/completions".to_string()
+        let base = std::env::var("GROQ_BASE_URL")
+            .unwrap_or_else(|_| "https://api.groq.com".to_string());
+        format!("{}/openai/v1/chat/completions", base.trim_end_matches('/'))
     }
 
     fn model_name(&self) -> &str {
@@ -112,5 +117,16 @@ impl ModelClient for GroqClient {
             .next()
             .and_then(|choice| choice.message.content)
             .ok_or_else(|| ModelClientError::ParseError("No response content".to_string()))
+    }
+
+    async fn send_request_streaming(
+        &self,
+        client: &Client,
+        messages: &[Message],
+        row: usize,
+        tx: &Sender<(usize, StreamEvent)>,
+    ) -> Result<(), ModelClientError> {
+        // Groq is OpenAI-SSE-compatible.
+        streaming::run_openai_sse(self, client, messages, row, tx).await
     }
 }

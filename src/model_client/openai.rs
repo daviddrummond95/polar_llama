@@ -1,8 +1,10 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
 use super::{ModelClient, ModelClientError, Message, Provider, EmbeddingClient};
+use super::streaming::{self, StreamEvent};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
+use tokio::sync::mpsc::Sender;
 
 /// Default OpenAI chat model
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
@@ -119,6 +121,16 @@ impl ModelClient for OpenAIClient {
             .next()
             .and_then(|choice| choice.message.content)
             .ok_or_else(|| ModelClientError::ParseError("No response content".to_string()))
+    }
+
+    async fn send_request_streaming(
+        &self,
+        client: &Client,
+        messages: &[Message],
+        row: usize,
+        tx: &Sender<(usize, StreamEvent)>,
+    ) -> Result<(), ModelClientError> {
+        streaming::run_openai_sse(self, client, messages, row, tx).await
     }
 }
 

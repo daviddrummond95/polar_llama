@@ -5,6 +5,7 @@ pub mod model_client;
 pub mod ann;
 pub mod cost;
 pub mod mcp;
+mod stream_pyfn;
 
 #[cfg(target_os = "linux")]
 use jemallocator::Jemalloc;
@@ -71,6 +72,10 @@ fn polar_llama(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Add the register_expressions function to the module
     m.add_function(wrap_pyfunction!(register_expressions, m)?)?;
+
+    // Streaming inference entry point (bypasses the polars_expr/serde kwargs
+    // boundary so it can receive a Python callback directly).
+    m.add_function(wrap_pyfunction!(stream_pyfn::_stream_inference_batch, m)?)?;
 
     Ok(())
 }
