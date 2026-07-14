@@ -36,12 +36,13 @@ except ImportError:
             GEMINI = "gemini"
             GROQ = "groq"
             BEDROCK = "bedrock"
-            
+
             def __init__(self, provider_str):
                 self.value = provider_str
-                
+
             def __str__(self):
                 return self.value
+
 
 # Import and initialize the expressions helper to ensure expressions are registered
 from polar_llama.expressions import ensure_expressions_registered, get_lib_path
@@ -51,10 +52,12 @@ ensure_expressions_registered()
 # Update the lib path to make sure we're using the actual library
 lib = get_lib_path()
 
-def _pydantic_to_json_schema(model: Type['BaseModel']) -> dict:
+
+def _pydantic_to_json_schema(model: Type["BaseModel"]) -> dict:
     """Convert a Pydantic model to JSON schema."""
     try:
         from pydantic import BaseModel
+
         if not issubclass(model, BaseModel):
             raise ValueError("response_model must be a Pydantic BaseModel subclass")
 
@@ -62,14 +65,32 @@ def _pydantic_to_json_schema(model: Type['BaseModel']) -> dict:
         schema = model.model_json_schema()
 
         # Recursively add additionalProperties: false to all objects
-        # This is required by some providers like Groq
-        # However, we skip objects that already have additionalProperties defined
-        # (like Dict[str, str] types which need dynamic keys)
+        # This is required by some providers like Groq.
+        # We skip objects that already have additionalProperties defined
+        # (e.g. a user-supplied response_model using Dict[str, str], which
+        # needs dynamic keys and is therefore incompatible with OpenAI strict
+        # mode -- see _validate_strict_mode_schema for a warning about that).
+        # Taxonomy-generated models (see _create_taxonomy_pydantic_model) never
+        # contain dynamic-key map objects, so this skip does not apply to them.
         def add_additional_properties_false(obj):
             if isinstance(obj, dict):
                 if obj.get("type") == "object" and "additionalProperties" not in obj:
                     # Only add if not already present (Dict types already have it defined)
                     obj["additionalProperties"] = False
+                # Defensive OpenAI-strict-mode enforcement: whenever an object
+                # node declares fixed `properties` (i.e. it is not a dynamic
+                # map with additionalProperties left permissive), `required`
+                # must list every property key. Pydantic v2 already does this
+                # for models where every field is required, but we enforce it
+                # here too so a future Pydantic change (or an Optional field
+                # with a default) can never silently reintroduce a strict-mode
+                # rejection like the one in issue #51.
+                if (
+                    obj.get("type") == "object"
+                    and "properties" in obj
+                    and obj.get("additionalProperties") is False
+                ):
+                    obj["required"] = list(obj["properties"].keys())
                 # Recursively process nested objects
                 for key, value in obj.items():
                     if isinstance(value, dict):
@@ -80,9 +101,36 @@ def _pydantic_to_json_schema(model: Type['BaseModel']) -> dict:
                                 add_additional_properties_false(item)
 
         add_additional_properties_false(schema)
+
+        # OpenAI strict mode forbids a `$ref` node from carrying sibling
+        # keywords: pydantic v2 emits a field that references a submodel AND
+        # has a description as `{"$ref": "#/$defs/X", "description": "..."}`,
+        # which OpenAI rejects with "$ref cannot have keywords {'description'}".
+        # (Taxonomy fields hit this: each outer field is a $ref to a
+        # <Field>Result model plus the taxonomy field's description.) The
+        # description is cosmetic for structured output, so drop every sibling
+        # of `$ref` so the reference stands alone.
+        def strip_ref_siblings(obj):
+            if isinstance(obj, dict):
+                if "$ref" in obj and len(obj) > 1:
+                    ref = obj["$ref"]
+                    obj.clear()
+                    obj["$ref"] = ref
+                for value in obj.values():
+                    if isinstance(value, dict):
+                        strip_ref_siblings(value)
+                    elif isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, dict):
+                                strip_ref_siblings(item)
+
+        strip_ref_siblings(schema)
         return schema
     except ImportError:
-        raise ImportError("Pydantic is required for structured outputs. Install with: pip install pydantic>=2.0.0")
+        raise ImportError(
+            "Pydantic is required for structured outputs. Install with: pip install pydantic>=2.0.0"
+        )
+
 
 def _extract_type_from_anyof(any_of: list, root_schema: dict) -> tuple:
     """
@@ -147,7 +195,9 @@ def _field_schema_to_polars_dtype(field_schema: dict, root_schema: dict) -> pl.D
 
     # Handle anyOf patterns (used for Optional fields in Pydantic v2)
     if "anyOf" in field_schema:
-        field_type, type_schema = _extract_type_from_anyof(field_schema["anyOf"], root_schema)
+        field_type, type_schema = _extract_type_from_anyof(
+            field_schema["anyOf"], root_schema
+        )
         # Create a temporary field_schema with the extracted type info
         field_schema = {**type_schema, "type": field_type}
 
@@ -180,8 +230,16 @@ def _field_schema_to_polars_dtype(field_schema: dict, root_schema: dict) -> pl.D
             return pl.List(items_dtype)
         return pl.List(pl.Utf8)  # Default to string list
     elif field_type == "object":
-        # Check if this is a Dict[str, str] type (has additionalProperties)
-        if "additionalProperties" in field_schema and field_schema["additionalProperties"] != False:
+        # Check if this is a Dict[str, str] type (has additionalProperties).
+        # Taxonomy-generated models never produce this shape (see
+        # _create_taxonomy_pydantic_model, which uses List[ThinkingItem]
+        # instead of Dict[str, str] to stay OpenAI-strict-mode compliant --
+        # issue #51). This branch remains for user-supplied response_models
+        # that still use Dict[str, str] with non-strict providers.
+        if (
+            "additionalProperties" in field_schema
+            and field_schema["additionalProperties"] != False
+        ):
             # This is a dictionary type, just use Utf8 for now
             # (Polars doesn't have a good way to represent arbitrary dicts in structs)
             return pl.Utf8
@@ -191,6 +249,7 @@ def _field_schema_to_polars_dtype(field_schema: dict, root_schema: dict) -> pl.D
     else:
         # Default to string for unknown types
         return pl.Utf8
+
 
 def _parse_json_to_struct(json_str_series: pl.Series, dtype: pl.DataType) -> pl.Series:
     """Parse a JSON string series into a struct series.
@@ -219,7 +278,10 @@ def _parse_json_to_struct(json_str_series: pl.Series, dtype: pl.DataType) -> pl.
 # Taxonomy-based Tagging
 # ============================================================================
 
-def _create_taxonomy_pydantic_model(taxonomy: Dict[str, Dict[str, Any]]) -> Type['BaseModel']:
+
+def _create_taxonomy_pydantic_model(
+    taxonomy: Dict[str, Dict[str, Any]],
+) -> Type["BaseModel"]:
     """
     Create a Pydantic model from a taxonomy definition.
 
@@ -237,14 +299,43 @@ def _create_taxonomy_pydantic_model(taxonomy: Dict[str, Dict[str, Any]]) -> Type
     }
 
     Each field in the output model will be a struct containing:
-    - thinking: Dict[str, str] - reasoning for each possible value
+    - thinking: List[{value, reasoning}] - one reasoning entry per possible value
     - reflection: str - overall reflection on the field analysis
     - value: str - the selected value
     - confidence: float - confidence in the selection (0.0 to 1.0)
+
+    Note: `thinking` is deliberately a List of fixed-key objects rather than a
+    `Dict[str, str]` keyed by value name. A dynamic-key map has no fixed
+    `properties`, so it cannot satisfy OpenAI's strict-mode JSON schema
+    requirements (every object node needs `properties`, `required` covering
+    every key, and `additionalProperties: false`) -- see issue #51. Using a
+    List of fixed-shape `{value, reasoning}` items sidesteps this entirely,
+    regardless of how taxonomy value names are spelled (including names that
+    aren't valid Python identifiers, e.g. "high-priority" or "3rd party").
     """
     try:
         from pydantic import BaseModel, Field, create_model
-        from typing import Dict
+        from typing import List
+
+        # Shared "thinking" item model: one entry per candidate taxonomy
+        # value, holding the value name being considered and the reasoning
+        # for/against it. Fixed keys (no dynamic map) keep this strict-mode
+        # compliant. Defined once and reused across all taxonomy fields to
+        # avoid duplicate $defs entries in the generated schema.
+        ThinkingItem = create_model(
+            "ThinkingItem",
+            value=(
+                str,
+                Field(..., description="The taxonomy value name being considered"),
+            ),
+            reasoning=(
+                str,
+                Field(
+                    ...,
+                    description="Reasoning for why this value does or does not apply",
+                ),
+            ),
+        )
 
         # Create a field result model for each taxonomy field
         field_models = {}
@@ -253,16 +344,49 @@ def _create_taxonomy_pydantic_model(taxonomy: Dict[str, Dict[str, Any]]) -> Type
             values = field_config.get("values", {})
             value_names = list(values.keys())
 
-            # Create the field result model with dynamic thinking keys
+            # Create the field result model. `thinking` is a list with one
+            # {value, reasoning} entry per possible value -- no dynamic keys.
             field_result_model = create_model(
                 f"{field_name.title()}Result",
-                thinking=(Dict[str, str], Field(..., description=f"Reasoning for each possible value: {', '.join(value_names)}")),
-                reflection=(str, Field(..., description="Overall reflection on your analysis of this field")),
-                value=(str, Field(..., description=f"Selected value from: {', '.join(value_names)}")),
-                confidence=(float, Field(..., ge=0.0, le=1.0, description="Confidence in the selected value (0.0 to 1.0)"))
+                thinking=(
+                    List[ThinkingItem],
+                    Field(
+                        ...,
+                        description=(
+                            f"One entry per possible value ({', '.join(value_names)}), "
+                            "each with the candidate value name and your reasoning for/against it"
+                        ),
+                    ),
+                ),
+                reflection=(
+                    str,
+                    Field(
+                        ...,
+                        description="Overall reflection on your analysis of this field",
+                    ),
+                ),
+                value=(
+                    str,
+                    Field(
+                        ...,
+                        description=f"Selected value from: {', '.join(value_names)}",
+                    ),
+                ),
+                confidence=(
+                    float,
+                    Field(
+                        ...,
+                        ge=0.0,
+                        le=1.0,
+                        description="Confidence in the selected value (0.0 to 1.0)",
+                    ),
+                ),
             )
 
-            field_models[field_name] = (field_result_model, Field(..., description=field_config.get("description", "")))
+            field_models[field_name] = (
+                field_result_model,
+                Field(..., description=field_config.get("description", "")),
+            )
 
         # Create the main taxonomy result model
         TaxonomyResult = create_model("TaxonomyResult", **field_models)
@@ -270,10 +394,14 @@ def _create_taxonomy_pydantic_model(taxonomy: Dict[str, Dict[str, Any]]) -> Type
         return TaxonomyResult
 
     except ImportError:
-        raise ImportError("Pydantic is required for taxonomy tagging. Install with: pip install pydantic>=2.0.0")
+        raise ImportError(
+            "Pydantic is required for taxonomy tagging. Install with: pip install pydantic>=2.0.0"
+        )
 
 
-def _create_taxonomy_prompt(taxonomy: Dict[str, Dict[str, Any]], document_field_name: str = "document") -> str:
+def _create_taxonomy_prompt(
+    taxonomy: Dict[str, Dict[str, Any]], document_field_name: str = "document"
+) -> str:
     """
     Create a system prompt for taxonomy-based tagging.
 
@@ -284,7 +412,7 @@ def _create_taxonomy_prompt(taxonomy: Dict[str, Dict[str, Any]], document_field_
         f"You are an expert document analyst. Analyze the provided {document_field_name} and tag it according to the following taxonomy.",
         "",
         "# Taxonomy Fields",
-        ""
+        "",
     ]
 
     for field_name, field_config in taxonomy.items():
@@ -302,31 +430,34 @@ def _create_taxonomy_prompt(taxonomy: Dict[str, Dict[str, Any]], document_field_
 
         prompt_parts.append("")
 
-    prompt_parts.extend([
-        "# Instructions",
-        "",
-        "For each field in the taxonomy:",
-        "",
-        "1. **Thinking**: Consider each possible value and write your reasoning for why it might or might not apply to the document. Provide one reasoning string for each possible value.",
-        "",
-        "2. **Reflection**: After thinking through all values, reflect on your analysis. Consider which value best fits the document and why.",
-        "",
-        "3. **Value**: Select the single best value from the possible values for this field.",
-        "",
-        "4. **Confidence**: Provide your confidence in this selection as a number between 0.0 (not confident) and 1.0 (very confident).",
-        "",
-        "Return your analysis in the structured format with all required fields."
-    ])
+    prompt_parts.extend(
+        [
+            "# Instructions",
+            "",
+            "For each field in the taxonomy:",
+            "",
+            "1. **Thinking**: For each possible value, add one entry to the `thinking` list containing `value` (the exact value name from the taxonomy) and `reasoning` (why it does or does not apply to the document). Include exactly one entry per possible value.",
+            "",
+            "2. **Reflection**: After thinking through all values, reflect on your analysis. Consider which value best fits the document and why.",
+            "",
+            "3. **Value**: Select the single best value from the possible values for this field. Note this is distinct from the per-candidate `value` entries inside `thinking` -- this `value` is your final selection.",
+            "",
+            "4. **Confidence**: Provide your confidence in this selection as a number between 0.0 (not confident) and 1.0 (very confident).",
+            "",
+            "Return your analysis in the structured format with all required fields.",
+        ]
+    )
 
     return "\n".join(prompt_parts)
+
 
 def inference_async(
     expr: IntoExpr,
     *,
     provider: Optional[Union[str, Provider]] = None,
     model: Optional[str] = None,
-    response_model: Optional[Type['BaseModel']] = None,
-    response_format: Optional[Type['BaseModel']] = None,
+    response_model: Optional[Type["BaseModel"]] = None,
+    response_format: Optional[Type["BaseModel"]] = None,
     cache: Union[bool, CacheConfig] = False,
     system_prompt: Optional[str] = None,
 ) -> pl.Expr:
@@ -434,19 +565,19 @@ def inference_async(
     if struct_dtype is not None:
         # Use map_batches to convert the JSON string series to struct series
         result_expr = result_expr.map_batches(
-            lambda s: _parse_json_to_struct(s, struct_dtype),
-            return_dtype=struct_dtype
+            lambda s: _parse_json_to_struct(s, struct_dtype), return_dtype=struct_dtype
         )
 
     return result_expr
+
 
 def inference(
     expr: IntoExpr,
     *,
     provider: Optional[Union[str, Provider]] = None,
     model: Optional[str] = None,
-    response_model: Optional[Type['BaseModel']] = None,
-    response_format: Optional[Type['BaseModel']] = None,
+    response_model: Optional[Type["BaseModel"]] = None,
+    response_format: Optional[Type["BaseModel"]] = None,
 ) -> pl.Expr:
     """
     Synchronously infer completions for the given text expressions using an LLM.
@@ -477,11 +608,12 @@ def inference(
         or String (if no response_model)
     """
     import warnings
+
     warnings.warn(
         "inference() is deprecated and will be removed in a future version. "
         "Use inference_async() instead for better performance and caching support.",
         DeprecationWarning,
-        stacklevel=2
+        stacklevel=2,
     )
     expr = parse_into_expr(expr)
 
@@ -524,19 +656,19 @@ def inference(
     if struct_dtype is not None:
         # Use map_batches to convert the JSON string series to struct series
         result_expr = result_expr.map_batches(
-            lambda s: _parse_json_to_struct(s, struct_dtype),
-            return_dtype=struct_dtype
+            lambda s: _parse_json_to_struct(s, struct_dtype), return_dtype=struct_dtype
         )
 
     return result_expr
+
 
 def inference_messages(
     expr: IntoExpr,
     *,
     provider: Optional[Union[str, Provider]] = None,
     model: Optional[str] = None,
-    response_model: Optional[Type['BaseModel']] = None,
-    response_format: Optional[Type['BaseModel']] = None,
+    response_model: Optional[Type["BaseModel"]] = None,
+    response_format: Optional[Type["BaseModel"]] = None,
     cache: Union[bool, CacheConfig] = False,
 ) -> pl.Expr:
     """
@@ -640,23 +772,23 @@ def inference_messages(
     if struct_dtype is not None:
         # Use map_batches to convert the JSON string series to struct series
         result_expr = result_expr.map_batches(
-            lambda s: _parse_json_to_struct(s, struct_dtype),
-            return_dtype=struct_dtype
+            lambda s: _parse_json_to_struct(s, struct_dtype), return_dtype=struct_dtype
         )
 
     return result_expr
 
+
 def string_to_message(expr: IntoExpr, *, message_type: str) -> pl.Expr:
     """
     Convert a string to a message with the specified type.
-    
+
     Parameters
     ----------
     expr : polars.Expr
         The text expression to convert
     message_type : str
         The type of message to create ("user", "system", "assistant")
-        
+
     Returns
     -------
     polars.Expr
@@ -670,6 +802,7 @@ def string_to_message(expr: IntoExpr, *, message_type: str) -> pl.Expr:
         lib=lib,
         kwargs={"message_type": message_type},
     )
+
 
 def combine_messages(*exprs: IntoExpr) -> pl.Expr:
     """
@@ -1041,7 +1174,7 @@ def tag_taxonomy(
     polars.Expr
         Expression with structured tags as a Struct. Each taxonomy field becomes
         a nested struct containing:
-        - thinking: Dict[str, str] - reasoning for each possible value
+        - thinking: List[{value, reasoning}] - one entry per possible value
         - reflection: str - overall reflection on the field analysis
         - value: str - the selected value
         - confidence: float - confidence score (0.0 to 1.0)
@@ -1110,24 +1243,18 @@ def tag_taxonomy(
     # Create a system message for each row by mapping over the document column
     # This ensures the system message is broadcast to match the number of rows
     system_message_expr = doc_expr.map_batches(
-        lambda s: pl.Series([system_prompt] * len(s)),
-        return_dtype=pl.Utf8
+        lambda s: pl.Series([system_prompt] * len(s)), return_dtype=pl.Utf8
     ).pipe(string_to_message, message_type="system")
 
     # Create a user message with the document
-    user_message_expr = doc_expr.pipe(
-        string_to_message, message_type="user"
-    )
+    user_message_expr = doc_expr.pipe(string_to_message, message_type="user")
 
     # Combine the messages
     messages_expr = combine_messages(system_message_expr, user_message_expr)
 
     # Call inference_messages with the structured output model
     return inference_messages(
-        messages_expr,
-        provider=provider,
-        model=model,
-        response_model=response_model
+        messages_expr, provider=provider, model=model, response_model=response_model
     )
 
 
@@ -1148,24 +1275,26 @@ from polar_llama.tools import (
 # Polars Namespace Accessor
 # ============================================================================
 
+
 @pl.api.register_expr_namespace("llama")
 class LlamaNamespace:
     """
     Polars namespace accessor for polar-llama functionality.
     Allows using `.llama` on expressions for a fluent API.
     """
+
     def __init__(self, expr: pl.Expr):
         self._expr = expr
 
     def to_message(self, *, role: str = "user") -> pl.Expr:
         """
         Convert a string expression to a message with the specified role.
-        
+
         Parameters
         ----------
         role : str
             The role of the message ("user", "system", "assistant")
-            
+
         Returns
         -------
         polars.Expr
@@ -1178,12 +1307,12 @@ class LlamaNamespace:
         *,
         provider: Optional[Union[str, Provider]] = None,
         model: Optional[str] = None,
-        response_model: Optional[Type['BaseModel']] = None,
-        response_format: Optional[Type['BaseModel']] = None,
+        response_model: Optional[Type["BaseModel"]] = None,
+        response_format: Optional[Type["BaseModel"]] = None,
     ) -> pl.Expr:
         """
         Synchronously infer completions for the expression using an LLM.
-        
+
         Parameters
         ----------
         provider : str or Provider, optional
@@ -1194,7 +1323,7 @@ class LlamaNamespace:
             Pydantic model for structured output
         response_format : Type[BaseModel], optional
             Alias for response_model
-            
+
         Returns
         -------
         polars.Expr
@@ -1204,7 +1333,7 @@ class LlamaNamespace:
             self._expr,
             provider=provider,
             model=model,
-            response_model=response_model or response_format
+            response_model=response_model or response_format,
         )
 
     def inference_async(
@@ -1212,8 +1341,8 @@ class LlamaNamespace:
         *,
         provider: Optional[Union[str, Provider]] = None,
         model: Optional[str] = None,
-        response_model: Optional[Type['BaseModel']] = None,
-        response_format: Optional[Type['BaseModel']] = None,
+        response_model: Optional[Type["BaseModel"]] = None,
+        response_format: Optional[Type["BaseModel"]] = None,
         cache: Union[bool, CacheConfig] = False,
         system_prompt: Optional[str] = None,
     ) -> pl.Expr:
@@ -1327,12 +1456,7 @@ class LlamaNamespace:
         """
         Tag documents according to a taxonomy definition.
         """
-        return tag_taxonomy(
-            self._expr,
-            taxonomy,
-            provider=provider,
-            model=model
-        )
+        return tag_taxonomy(self._expr, taxonomy, provider=provider, model=model)
 
     def embedding(
         self,
@@ -1355,11 +1479,7 @@ class LlamaNamespace:
         polars.Expr
             Expression with embeddings as List[Float64]
         """
-        return embedding_async(
-            self._expr,
-            provider=provider,
-            model=model
-        )
+        return embedding_async(self._expr, provider=provider, model=model)
 
     def cosine_similarity(self, other: IntoExpr) -> pl.Expr:
         """
@@ -1461,14 +1581,15 @@ class LlamaNamespace:
 # Helper Functions
 # ============================================================================
 
+
 def template(format_string: str, *args: IntoExpr, **kwargs: IntoExpr) -> pl.Expr:
     """
     Helper function for prompt templating that abstracts away Polars version differences.
-    
+
     Usage:
         polar_llama.template("Hello {}", pl.col("name"))
         polar_llama.template("Hello {name}", name=pl.col("name"))
-        
+
     Parameters
     ----------
     format_string : str
@@ -1477,7 +1598,7 @@ def template(format_string: str, *args: IntoExpr, **kwargs: IntoExpr) -> pl.Expr
         Positional arguments for formatting
     **kwargs : polars.Expr
         Keyword arguments for formatting
-        
+
     Returns
     -------
     polars.Expr
@@ -1487,12 +1608,12 @@ def template(format_string: str, *args: IntoExpr, **kwargs: IntoExpr) -> pl.Expr
     # pl.format with kwargs was introduced in recent versions
     # If we want to be safe, we can try to use it, and if it fails, fallback or error
     # But simpler is to rely on pl.format if available.
-    
-    # For now, we'll just wrap pl.format. 
+
+    # For now, we'll just wrap pl.format.
     # If the user is on an old version that doesn't support kwargs, they should use positional args
     # or we can try to implement a polyfill if needed.
     # However, the recommendation implies we should abstract it.
-    
+
     try:
         return pl.format(format_string, *args, **kwargs)
     except TypeError:
@@ -1505,6 +1626,7 @@ def template(format_string: str, *args: IntoExpr, **kwargs: IntoExpr) -> pl.Expr
             # But the recommendation says "Abstract Prompt Templating... ensure the library works consistently".
             pass
         return pl.format(format_string, *args)
+
 
 # ============================================================================
 # Prompt Optimization (DSPy-style)
@@ -1524,7 +1646,7 @@ from polar_llama.optimize import (  # noqa: E402
 )
 
 
-def _validate_strict_mode_schema(model: Type['BaseModel']) -> None:
+def _validate_strict_mode_schema(model: Type["BaseModel"]) -> None:
     """
     Validate that a Pydantic model is compatible with OpenAI Strict Mode.
     Specifically checks for default values which are not allowed.
@@ -1532,15 +1654,34 @@ def _validate_strict_mode_schema(model: Type['BaseModel']) -> None:
     try:
         from pydantic import BaseModel
         from pydantic.fields import FieldInfo
-        
+
         if not issubclass(model, BaseModel):
             return
 
         for name, field in model.model_fields.items():
+            # Warn about Dict-typed fields: pydantic emits these as
+            # {"type": "object", "additionalProperties": {...}} with no fixed
+            # `properties`, which OpenAI strict mode (always requested by the
+            # Rust client, see src/model_client/openai.rs) rejects -- this is
+            # the root cause of issue #51 for user-supplied response_models.
+            annotation = getattr(field, "annotation", None)
+            origin = getattr(annotation, "__origin__", None)
+            if origin is dict or annotation is dict:
+                import warnings
+
+                warnings.warn(
+                    f"Field '{name}' in model '{model.__name__}' is a Dict type. "
+                    "Dict-typed fields produce JSON schemas with dynamic keys "
+                    "(additionalProperties) that are incompatible with OpenAI "
+                    "Structured Outputs strict mode. Use a nested model or a "
+                    "List of key/value items instead (e.g. List[{value, reasoning}]).",
+                    UserWarning,
+                )
+
             # Check if field has a default value
             # In Pydantic v2, field.default is PydanticUndefined if no default
             # field.is_required() is another way to check
-            
+
             if not field.is_required():
                 # It has a default value (or is Optional with default None)
                 # OpenAI Strict Mode doesn't support default values for required fields?
@@ -1550,15 +1691,19 @@ def _validate_strict_mode_schema(model: Type['BaseModel']) -> None:
                 # This means the field is NOT required in Pydantic, so it has a default.
                 # OpenAI expects the schema to NOT have defaults if we want strict adherence?
                 # Or rather, OpenAI's structured outputs require all fields to be specified in the schema and usually required.
-                
+
                 # Let's warn if we see a default value that is not None (Optional is usually fine if handled correctly, but defaults like "USD" are problematic)
-                if field.default is not None and str(field.default) != "PydanticUndefined":
-                     import warnings
-                     warnings.warn(
-                         f"Field '{name}' in model '{model.__name__}' has a default value '{field.default}'. "
-                         "OpenAI Structured Outputs (Strict Mode) may not support default values. "
-                         "Consider removing the default value or handling it explicitly.",
-                         UserWarning
-                     )
+                if (
+                    field.default is not None
+                    and str(field.default) != "PydanticUndefined"
+                ):
+                    import warnings
+
+                    warnings.warn(
+                        f"Field '{name}' in model '{model.__name__}' has a default value '{field.default}'. "
+                        "OpenAI Structured Outputs (Strict Mode) may not support default values. "
+                        "Consider removing the default value or handling it explicitly.",
+                        UserWarning,
+                    )
     except ImportError:
         pass
