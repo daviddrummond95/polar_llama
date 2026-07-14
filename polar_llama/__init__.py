@@ -101,6 +101,30 @@ def _pydantic_to_json_schema(model: Type["BaseModel"]) -> dict:
                                 add_additional_properties_false(item)
 
         add_additional_properties_false(schema)
+
+        # OpenAI strict mode forbids a `$ref` node from carrying sibling
+        # keywords: pydantic v2 emits a field that references a submodel AND
+        # has a description as `{"$ref": "#/$defs/X", "description": "..."}`,
+        # which OpenAI rejects with "$ref cannot have keywords {'description'}".
+        # (Taxonomy fields hit this: each outer field is a $ref to a
+        # <Field>Result model plus the taxonomy field's description.) The
+        # description is cosmetic for structured output, so drop every sibling
+        # of `$ref` so the reference stands alone.
+        def strip_ref_siblings(obj):
+            if isinstance(obj, dict):
+                if "$ref" in obj and len(obj) > 1:
+                    ref = obj["$ref"]
+                    obj.clear()
+                    obj["$ref"] = ref
+                for value in obj.values():
+                    if isinstance(value, dict):
+                        strip_ref_siblings(value)
+                    elif isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, dict):
+                                strip_ref_siblings(item)
+
+        strip_ref_siblings(schema)
         return schema
     except ImportError:
         raise ImportError(

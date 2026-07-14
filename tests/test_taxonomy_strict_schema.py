@@ -62,6 +62,16 @@ def _walk_assert_strict_compliant(node):
             f"dynamic map object leaked into schema (issue #51): {node}"
         )
 
+        # OpenAI strict mode forbids a `$ref` node from carrying sibling
+        # keywords (e.g. a description). This is the second strict-mode
+        # violation surfaced by a live gpt-4o-mini call while fixing #51:
+        # "$ref cannot have keywords {'description'}".
+        if "$ref" in node:
+            assert set(node.keys()) == {"$ref"}, (
+                f"$ref node has sibling keywords (rejected by OpenAI strict "
+                f"mode): {node}"
+            )
+
         for value in node.values():
             _walk_assert_strict_compliant(value)
     elif isinstance(node, list):
