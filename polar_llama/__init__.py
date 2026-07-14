@@ -1945,6 +1945,23 @@ def tag_taxonomy(
 
 
 # ============================================================================
+# Codebook Induction (issue #78) — see docs/CODEBOOK_INDUCTION.md
+# ============================================================================
+
+from polar_llama.codebook import (
+    CLUSTER_STRUCT_DTYPE,
+    Codebook,
+    CodebookEntry,
+    CodebookInductionResult,
+    apply_codebook,
+    cluster_embeddings,
+    codebook_to_taxonomy,
+    dedupe_codebook_entries,
+    induce_codebook,
+)
+
+
+# ============================================================================
 # Tool Use (MCP) — see docs/design/MCP_TOOL_INTEGRATION.md
 # ============================================================================
 
@@ -2296,6 +2313,45 @@ class LlamaNamespace:
             List of indices of the k nearest neighbors
         """
         return knn_hnsw(self._expr, reference, k=k)
+
+    def cluster_embeddings(
+        self,
+        *,
+        k: Optional[int] = None,
+        k_min: int = 2,
+        k_max: int = 20,
+        max_iter: int = 100,
+        n_init: int = 8,
+        seed: int = 0,
+        silhouette_sample: int = 200,
+    ) -> pl.Expr:
+        """
+        Cluster this embeddings column with k-means. See
+        ``polar_llama.cluster_embeddings``.
+        """
+        return cluster_embeddings(
+            self._expr,
+            k=k,
+            k_min=k_min,
+            k_max=k_max,
+            max_iter=max_iter,
+            n_init=n_init,
+            seed=seed,
+            silhouette_sample=silhouette_sample,
+        )
+
+    def apply_codebook(
+        self,
+        codebook,
+        *,
+        provider: Optional[Union[str, Provider]] = None,
+        model: Optional[str] = None,
+    ) -> pl.Expr:
+        """
+        Multi-label-apply a codebook to this text column. See
+        ``polar_llama.apply_codebook``.
+        """
+        return apply_codebook(self._expr, codebook, provider=provider, model=model)
 
     def execute_tool_calls(
         self,

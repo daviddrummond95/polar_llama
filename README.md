@@ -591,6 +591,39 @@ query = query.with_columns(
 
 See `docs/VECTOR_SIMILARITY_AND_ANN.md` for complete documentation and advanced examples.
 
+#### Codebook Induction
+
+Build a qualitative-coding codebook from a text column — embed, cluster, and let the LLM name and define each cluster — then apply it back as multi-label tags. No external clustering dependency: `cluster_embeddings` is a hand-rolled k-means (k-means++ / Lloyd's, in Rust) with automatic `k` selection via sampled silhouette.
+
+```python
+from polar_llama import induce_codebook, apply_codebook, Provider
+
+tickets = pl.DataFrame({"text": [...]})  # a text column to discover themes in
+
+# 1. Embed + cluster + name each cluster with an LLM (auto-picks k)
+result = induce_codebook(
+    tickets, "text", provider=Provider.OPENAI, model="gpt-4o-mini"
+)
+print(result.codebook)              # Codebook(5 codes: billing_issue, login_failure, ...)
+print(result.df["cluster_id"])      # same rows as `tickets`, plus cluster_id/cluster_distance
+
+# 2. Apply the induced codebook back as multi-label tags — composes directly
+#    onto result.df, no join or explode needed
+coded = result.df.with_columns(
+    labels=apply_codebook(pl.col("text"), result.codebook, provider=Provider.OPENAI)
+)
+# labels: List[Struct{code, applies, confidence, evidence}], one entry per code
+```
+
+**Key Features:**
+- **Zero clustering dependencies**: k-means++ / Lloyd's, a splitmix64 PRNG, and sampled silhouette are hand-rolled in Rust (`src/kmeans.rs`) — no `scikit-learn`/`numpy`/`umap`.
+- **DataFrame-shaped**: `induce_codebook` is DataFrame-in/DataFrame-out (same row count and order back, plus `cluster_id`/`cluster_distance`); `apply_codebook` is expression-in/expression-out.
+- **Multi-label by design**: `apply_codebook` evaluates every candidate code per document in one structured-output call — several codes can apply to the same document.
+- **Strict-mode safe**: the apply model is a fixed-length `List[{code, applies, confidence, evidence}]`, never a `Dict` keyed by code (the same lesson as taxonomy tagging's `thinking` field).
+- **Bridges to `tag_taxonomy`**: `codebook_to_taxonomy(result.codebook)` turns an induced codebook into a taxonomy for single-label (mutually exclusive) classification instead.
+
+See `docs/CODEBOOK_INDUCTION.md` for the full walkthrough.
+
 #### Tool Use and MCP
 
 Polar Llama supports tool calling without hiding an agent loop inside your rows. The loop is unrolled into the dataframe: the LLM *emits* tool calls as structured output, `execute_tool_calls` runs every call of every row concurrently (against an MCP server or any Python callable), and a second inference pass synthesizes the results — every intermediate step is an ordinary column.

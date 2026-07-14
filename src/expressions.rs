@@ -850,6 +850,147 @@ fn knn_output_type(_input_fields: &[Field]) -> PolarsResult<Field> {
 }
 
 // ============================================================================
+// Codebook Induction: k-means clustering (issue #78)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct ClusterEmbeddingsKwargs {
+    /// Fixed number of clusters. `None` (the default) auto-selects `k` in
+    /// `[k_min, k_max]` via sampled silhouette (see `crate::kmeans::auto_k`).
+    #[serde(default)]
+    k: Option<usize>,
+    #[serde(default = "default_cluster_k_min")]
+    k_min: usize,
+    #[serde(default = "default_cluster_k_max")]
+    k_max: usize,
+    #[serde(default = "default_cluster_max_iter")]
+    max_iter: usize,
+    #[serde(default = "default_cluster_n_init")]
+    n_init: usize,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default = "default_silhouette_sample")]
+    silhouette_sample: usize,
+}
+
+fn default_cluster_k_min() -> usize {
+    2
+}
+
+fn default_cluster_k_max() -> usize {
+    20
+}
+
+fn default_cluster_max_iter() -> usize {
+    100
+}
+
+fn default_cluster_n_init() -> usize {
+    8
+}
+
+fn default_silhouette_sample() -> usize {
+    200
+}
+
+/// Cluster a whole column of embeddings with hand-rolled k-means++ / Lloyd's
+/// algorithm (`crate::kmeans`) -- a *whole-column* plugin expression (the
+/// entire embeddings column is clustered together in one call, not row by
+/// row), following the same pattern as `knn_hnsw` above: it is registered
+/// `is_elementwise=True` on the Python side purely so it can be used inside
+/// `with_columns`, even though the underlying computation is over the full
+/// column at once.
+///
+/// Null / empty-vector rows are excluded from clustering and come back as a
+/// null output row. Every non-null row gets a JSON-encoded
+/// `{"cluster": u32, "distance": f64, "k": u32}` string, decoded into a
+/// `Struct` on the Python side (`polar_llama.codebook.cluster_embeddings`) --
+/// the same "emit JSON, decode with an explicit dtype" convention used by
+/// `inference_async`/`inference_messages` structured output.
+#[polars_expr(output_type=String)]
+fn cluster_embeddings(inputs: &[Series], kwargs: ClusterEmbeddingsKwargs) -> PolarsResult<Series> {
+    let embeddings = inputs[0].list()?;
+
+    if embeddings.is_empty() || embeddings.dtype() == &DataType::Null {
+        return Ok(StringChunked::from_iter_options(
+            embeddings.name().clone(),
+            std::iter::empty::<Option<String>>(),
+        )
+        .into_series());
+    }
+
+    // Extract non-null, non-empty embedding vectors, remembering their
+    // original row position so results can be scattered back in order.
+    let mut indices: Vec<usize> = Vec::new();
+    let mut points: Vec<Vec<f64>> = Vec::new();
+    for i in 0..embeddings.len() {
+        if let Some(row) = embeddings.get(i) {
+            let inner = row.as_ref();
+            // Accept both Float64 (what embedding_async emits) and Float32
+            // (common for user-supplied precomputed embeddings, e.g.
+            // sentence-transformers / numpy default), casting f32 -> f64.
+            // Anything else leaves the row as a null cluster.
+            let v: Option<Vec<f64>> = inner
+                .as_any()
+                .downcast_ref::<polars_arrow::array::PrimitiveArray<f64>>()
+                .map(|arr| arr.values_iter().copied().collect())
+                .or_else(|| {
+                    inner
+                        .as_any()
+                        .downcast_ref::<polars_arrow::array::PrimitiveArray<f32>>()
+                        .map(|arr| arr.values_iter().map(|&x| x as f64).collect())
+                });
+            if let Some(v) = v {
+                if !v.is_empty() {
+                    indices.push(i);
+                    points.push(v);
+                }
+            }
+        }
+    }
+
+    let mut rows: Vec<Option<String>> = vec![None; embeddings.len()];
+
+    let n = points.len();
+    if n == 1 {
+        let json = serde_json::json!({"cluster": 0u32, "distance": 0.0f64, "k": 1u32});
+        rows[indices[0]] = Some(json.to_string());
+    } else if n > 1 {
+        let max_iter = kwargs.max_iter.max(1);
+        let n_init = kwargs.n_init.max(1);
+        let seed = kwargs.seed;
+        let silhouette_sample = kwargs.silhouette_sample.max(1);
+
+        let (chosen_k, result) = match kwargs.k {
+            Some(k) => {
+                let k = k.clamp(1, n);
+                (k, crate::kmeans::kmeans(&points, k, max_iter, n_init, seed))
+            }
+            None => crate::kmeans::auto_k(
+                &points,
+                kwargs.k_min,
+                kwargs.k_max,
+                max_iter,
+                n_init,
+                seed,
+                silhouette_sample,
+            ),
+        };
+
+        for (pos, &orig_idx) in indices.iter().enumerate() {
+            let json = serde_json::json!({
+                "cluster": result.labels[pos] as u32,
+                "distance": result.distances[pos],
+                "k": chosen_k as u32,
+            });
+            rows[orig_idx] = Some(json.to_string());
+        }
+    }
+
+    Ok(StringChunked::from_iter_options(embeddings.name().clone(), rows.into_iter()).into_series())
+}
+
+// ============================================================================
 // Tool Call Execution (MCP)
 // ============================================================================
 
