@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional, Union, Type, Dict, Any, List
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Optional,
+    Tuple,
+    Union,
+    Type,
+    Dict,
+    Any,
+    List,
+)
 import json
 
 import polars as pl
@@ -13,6 +23,13 @@ from polar_llama.keys import (
     config_fingerprint,
     canonicalize_messages_input,
     endpoint_fingerprint_input,
+)
+from polar_llama.dedup import (
+    DedupeStats,
+    ResponseCache,
+    ResponseCacheStore,
+    _parse_ttl,
+    deduped_expr,
 )
 from polar_llama import pricing
 from polar_llama.pricing import register_model_price, set_price_table
@@ -614,6 +631,43 @@ def _make_run_pending(
     return run_pending
 
 
+def _request_fingerprint(
+    symbol: str, kwargs: Dict[str, Any], system_prompt: Optional[str] = None
+) -> Tuple[str, Dict[str, Any]]:
+    """Compute the request-shaping fingerprint + a debuggable inputs dict.
+
+    Shared by the checkpoint path (issue #75) and the dedupe/response_cache
+    path (issue #77) so "the same request" means exactly the same thing to
+    both -- extracted from what used to be duplicated inline in
+    `inference_async` and `inference_messages` (`config_fingerprint` +
+    `endpoint_fingerprint_input`, `polar_llama/keys.py`). The returned
+    `fingerprint_inputs` dict is purely for `_meta.json` debuggability (not
+    used for invalidation -- `fingerprint` alone is authoritative), so
+    unifying its shape across both call sites changes no observable
+    behavior.
+    """
+    endpoint = endpoint_fingerprint_input(kwargs["provider"])
+    fingerprint = config_fingerprint(
+        symbol=symbol,
+        provider=kwargs["provider"],
+        model=kwargs["model"],
+        response_schema=kwargs["response_schema"],
+        response_model_name=kwargs["response_model_name"],
+        system_prompt=system_prompt,
+        extra={"endpoint": endpoint},
+    )
+    fingerprint_inputs = {
+        "symbol": symbol,
+        "provider": kwargs["provider"],
+        "model": kwargs["model"],
+        "response_model_name": kwargs["response_model_name"],
+        "has_response_schema": kwargs["response_schema"] is not None,
+        "has_system_prompt": system_prompt is not None,
+        "endpoint": endpoint,
+    }
+    return fingerprint, fingerprint_inputs
+
+
 def inference_async(
     expr: IntoExpr,
     *,
@@ -626,6 +680,9 @@ def inference_async(
     checkpoint: Optional[Union[str, Path, Checkpoint]] = None,
     usage: bool = False,
     price_table: Optional[Union[Dict[str, Any], str, Path]] = None,
+    dedupe: bool = False,
+    response_cache: Optional[Union[str, Path, ResponseCache]] = None,
+    dedupe_stats: Optional[DedupeStats] = None,
 ) -> pl.Expr:
     """
     Asynchronously infer completions for the given text expressions using an LLM.
@@ -736,6 +793,63 @@ def inference_async(
         ``polar_llama/data/prices.json``: ``{"<provider>": {"<model>":
         {"input_per_1m": ..., "output_per_1m": ..., "cached_input_per_1m":
         ...}}}``.
+    dedupe : bool, optional
+        Enable in-run duplicate collapsing (issue #77): identical rows
+        *within one batch* are sent to the backend once, and the single
+        result is fanned back out to every row that asked for it. Zero
+        extra I/O -- pure in-memory content-hash grouping. Default: False
+        (byte-identical to the pre-#77 code path -- every row is sent as
+        its own request, even exact duplicates). Ignored (silently
+        subsumed, no warning) when ``checkpoint=`` is also set -- the
+        checkpoint UDF already collapses duplicates per batch.
+    response_cache : str, Path, or ResponseCache, optional
+        Enable a persistent, cross-job response cache (issue #77): a
+        str/Path is shorthand for ``ResponseCache(path)``; pass a
+        ``ResponseCache`` for ``ttl``/``on_mismatch`` control. Identical
+        requests -- across different runs, even different processes --
+        reuse a prior result instead of re-calling the backend. Implies
+        ``dedupe=True`` for free (computing content keys to consult the
+        store already does the grouping). Only successful results are ever
+        persisted; a failed row always recomputes on the next run. Not
+        currently supported together with ``checkpoint=`` or ``usage=True``
+        (raises ``ValueError`` -- see below). Default: None (disabled).
+
+        See also ``polar_llama.ResponseCache.clear()`` /
+        ``.prune()`` for manual invalidation/compaction.
+
+        Disambiguation -- four different things are all called "cache" in
+        this library:
+
+        =================  ================================================
+        Kwarg              What it caches
+        =================  ================================================
+        ``cache=``         Provider prompt-prefix caching (transport-level;
+                            changes how a request is *sent*, not what is
+                            asked for).
+        ``checkpoint=``     Resume the *same* job after a crash.
+        ``dedupe=``         Collapse exact-duplicate rows *within one run*.
+        ``response_cache=`` Reuse results *across* runs/processes for
+                            identical requests.
+        =================  ================================================
+
+        These compose freely except where noted above: ``dedupe=``/
+        ``response_cache=`` alongside provider ``cache=`` simply means
+        fewer unique calls reach the provider, so fewer opportunities for
+        its own prompt-cache to hit.
+    dedupe_stats : DedupeStats, optional
+        Mutable accumulator populated (in place, at collect time) with
+        ``rows_total``, ``rows_null``, ``cache_hits``, ``rows_collapsed``,
+        and ``calls_made`` when ``dedupe=True`` or ``response_cache=...``
+        is set. See ``polar_llama.DedupeStats``. Ignored (never populated)
+        when neither is set.
+
+        Example::
+
+            >>> stats = DedupeStats()
+            >>> out = df.with_columns(
+            ...     r=inference_async(pl.col("p"), dedupe=True, dedupe_stats=stats)
+            ... )
+            >>> stats.hit_rate, stats.rows_collapsed, stats.calls_made  # doctest: +SKIP
 
     Returns
     -------
@@ -751,6 +865,27 @@ def inference_async(
             "with checkpoint=... (the checkpoint store's failed-row detection "
             "does not look inside the usage envelope -- see the `usage` "
             "parameter docstring). Use one or the other for now."
+        )
+
+    if response_cache is not None and checkpoint is not None:
+        raise ValueError(
+            "inference_async: response_cache=... cannot be combined with "
+            "checkpoint=... -- two persistent stores for one expression. "
+            "Point checkpoint= at a directory for same-job resume, "
+            "response_cache= at a directory for cross-job reuse; the "
+            "checkpoint path already collapses in-batch duplicates on its "
+            "own, so composing the two is not needed."
+        )
+
+    if response_cache is not None and usage:
+        raise ValueError(
+            "inference_async: response_cache=... is not currently supported "
+            "together with usage=True (the same envelope problem as "
+            "checkpoint=... + usage=True -- see the `usage` parameter "
+            "docstring: a failed row's error is nested one level deeper "
+            "under the usage envelope, so it would be misclassified as ok "
+            "and cached; a served row's cached usage would also misreport "
+            "spend). Use one or the other for now."
         )
 
     # Convert Provider to string to make it picklable. All keys are always
@@ -797,31 +932,43 @@ def inference_async(
     if checkpoint is not None:
         if not isinstance(checkpoint, Checkpoint):
             checkpoint = Checkpoint(checkpoint)
-        endpoint = endpoint_fingerprint_input(kwargs["provider"])
-        fingerprint = config_fingerprint(
-            symbol="inference_async",
-            provider=kwargs["provider"],
-            model=kwargs["model"],
-            response_schema=kwargs["response_schema"],
-            response_model_name=kwargs["response_model_name"],
-            system_prompt=system_prompt,
-            extra={"endpoint": endpoint},
+        fingerprint, fingerprint_inputs = _request_fingerprint(
+            "inference_async", kwargs, system_prompt
         )
-        fingerprint_inputs = {
-            "symbol": "inference_async",
-            "provider": kwargs["provider"],
-            "model": kwargs["model"],
-            "response_model_name": kwargs["response_model_name"],
-            "has_response_schema": kwargs["response_schema"] is not None,
-            "has_system_prompt": system_prompt is not None,
-            "endpoint": endpoint,
-        }
         result_expr = checkpointed_expr(
             expr,
             run_pending=_make_run_pending("inference_async", kwargs),
             fingerprint=fingerprint,
             checkpoint=checkpoint,
             fingerprint_inputs=fingerprint_inputs,
+            has_schema=kwargs["response_schema"] is not None,
+        )
+    elif dedupe or response_cache is not None:
+        fingerprint, fingerprint_inputs = _request_fingerprint(
+            "inference_async", kwargs, system_prompt
+        )
+        store = None
+        ttl_seconds = None
+        if response_cache is not None:
+            rc = (
+                response_cache
+                if isinstance(response_cache, ResponseCache)
+                else ResponseCache(response_cache)
+            )
+            store = ResponseCacheStore(
+                rc.path,
+                fingerprint,
+                rc.on_mismatch,
+                fingerprint_inputs=fingerprint_inputs,
+            )
+            ttl_seconds = _parse_ttl(rc.ttl)
+        result_expr = deduped_expr(
+            expr,
+            run_pending=_make_run_pending("inference_async", kwargs),
+            fingerprint=fingerprint,
+            store=store,
+            ttl_seconds=ttl_seconds,
+            stats=dedupe_stats,
             has_schema=kwargs["response_schema"] is not None,
         )
     else:
@@ -955,6 +1102,9 @@ def inference_messages(
     checkpoint: Optional[Union[str, Path, Checkpoint]] = None,
     usage: bool = False,
     price_table: Optional[Union[Dict[str, Any], str, Path]] = None,
+    dedupe: bool = False,
+    response_cache: Optional[Union[str, Path, ResponseCache]] = None,
+    dedupe_stats: Optional[DedupeStats] = None,
 ) -> pl.Expr:
     """
     Process message arrays (conversations) for inference using LLMs.
@@ -1011,6 +1161,20 @@ def inference_messages(
     price_table : dict, str, or Path, optional
         Per-call cost-resolution override (``usage=True`` only). See
         ``inference_async``.
+    dedupe : bool, optional
+        Enable in-run duplicate collapsing (issue #77). See
+        ``inference_async`` for the full description; behaves identically
+        here, including sharing content keys across the two accepted input
+        shapes (JSON-string vs. ``List(Struct{role, content})``) exactly
+        like ``checkpoint=`` does. Default: False.
+    response_cache : str, Path, or ResponseCache, optional
+        Enable a persistent, cross-job response cache (issue #77). See
+        ``inference_async`` for the full description; behaves identically
+        here. Not currently supported together with ``checkpoint=`` or
+        ``usage=True`` (raises ``ValueError``). Default: None.
+    dedupe_stats : DedupeStats, optional
+        Mutable accumulator for ``dedupe=``/``response_cache=`` aggregates.
+        See ``inference_async``.
 
     Returns
     -------
@@ -1026,6 +1190,21 @@ def inference_messages(
             "together with checkpoint=... (see the `usage` parameter "
             "docstring on inference_async for why). Use one or the other "
             "for now."
+        )
+
+    if response_cache is not None and checkpoint is not None:
+        raise ValueError(
+            "inference_messages: response_cache=... cannot be combined with "
+            "checkpoint=... (see the `response_cache` parameter docstring "
+            "on inference_async for why). Use one or the other for now."
+        )
+
+    if response_cache is not None and usage:
+        raise ValueError(
+            "inference_messages: response_cache=... is not currently "
+            "supported together with usage=True (see the `response_cache` "
+            "parameter docstring on inference_async for why). Use one or "
+            "the other for now."
         )
 
     # Both JSON-string input and List(Struct{role, content}) input are handled
@@ -1073,23 +1252,9 @@ def inference_messages(
     if checkpoint is not None:
         if not isinstance(checkpoint, Checkpoint):
             checkpoint = Checkpoint(checkpoint)
-        endpoint = endpoint_fingerprint_input(kwargs["provider"])
-        fingerprint = config_fingerprint(
-            symbol="inference_messages",
-            provider=kwargs["provider"],
-            model=kwargs["model"],
-            response_schema=kwargs["response_schema"],
-            response_model_name=kwargs["response_model_name"],
-            extra={"endpoint": endpoint},
+        fingerprint, fingerprint_inputs = _request_fingerprint(
+            "inference_messages", kwargs
         )
-        fingerprint_inputs = {
-            "symbol": "inference_messages",
-            "provider": kwargs["provider"],
-            "model": kwargs["model"],
-            "response_model_name": kwargs["response_model_name"],
-            "has_response_schema": kwargs["response_schema"] is not None,
-            "endpoint": endpoint,
-        }
         result_expr = checkpointed_expr(
             expr,
             run_pending=_make_run_pending("inference_messages", kwargs),
@@ -1097,6 +1262,35 @@ def inference_messages(
             checkpoint=checkpoint,
             canonicalize=canonicalize_messages_input,
             fingerprint_inputs=fingerprint_inputs,
+            has_schema=kwargs["response_schema"] is not None,
+        )
+    elif dedupe or response_cache is not None:
+        fingerprint, fingerprint_inputs = _request_fingerprint(
+            "inference_messages", kwargs
+        )
+        store = None
+        ttl_seconds = None
+        if response_cache is not None:
+            rc = (
+                response_cache
+                if isinstance(response_cache, ResponseCache)
+                else ResponseCache(response_cache)
+            )
+            store = ResponseCacheStore(
+                rc.path,
+                fingerprint,
+                rc.on_mismatch,
+                fingerprint_inputs=fingerprint_inputs,
+            )
+            ttl_seconds = _parse_ttl(rc.ttl)
+        result_expr = deduped_expr(
+            expr,
+            run_pending=_make_run_pending("inference_messages", kwargs),
+            fingerprint=fingerprint,
+            canonicalize=canonicalize_messages_input,
+            store=store,
+            ttl_seconds=ttl_seconds,
+            stats=dedupe_stats,
             has_schema=kwargs["response_schema"] is not None,
         )
     else:
@@ -1840,6 +2034,9 @@ class LlamaNamespace:
         checkpoint: Optional[Union[str, Path, Checkpoint]] = None,
         usage: bool = False,
         price_table: Optional[Union[Dict[str, Any], str, Path]] = None,
+        dedupe: bool = False,
+        response_cache: Optional[Union[str, Path, ResponseCache]] = None,
+        dedupe_stats: Optional[DedupeStats] = None,
     ) -> pl.Expr:
         """
         Asynchronously infer completions for the expression using an LLM.
@@ -1867,6 +2064,15 @@ class LlamaNamespace:
             ``inference_async`` for details).
         price_table : dict, str, or Path, optional
             Per-call cost-resolution override (``usage=True`` only).
+        dedupe : bool, optional
+            Enable in-run duplicate collapsing (see the functional
+            ``inference_async`` for details).
+        response_cache : str, Path, or ResponseCache, optional
+            Enable a persistent, cross-job response cache (see the
+            functional ``inference_async`` for details).
+        dedupe_stats : DedupeStats, optional
+            Mutable accumulator for ``dedupe=``/``response_cache=``
+            aggregates.
 
         Returns
         -------
@@ -1883,6 +2089,9 @@ class LlamaNamespace:
             checkpoint=checkpoint,
             usage=usage,
             price_table=price_table,
+            dedupe=dedupe,
+            response_cache=response_cache,
+            dedupe_stats=dedupe_stats,
         )
 
     def inference_stream(

@@ -80,7 +80,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import polars as pl
 
-from polar_llama.keys import content_key
+from polar_llama.keys import CollapsePlan, fan_out, plan_collapse
 
 _META_FILENAME = "_meta.json"
 _FORMAT_VERSION = 1
@@ -219,7 +219,7 @@ class CheckpointStore:
     def __init__(
         self,
         path: Union[str, Path],
-        fingerprint: str,
+        fingerprint: Optional[str],
         on_mismatch: str = "restart",
         fingerprint_inputs: Optional[Dict[str, Any]] = None,
     ) -> None:
@@ -234,6 +234,14 @@ class CheckpointStore:
         return self.path / _META_FILENAME
 
     def _reconcile_meta(self, fingerprint_inputs: Optional[Dict[str, Any]]) -> None:
+        if self.fingerprint is None:
+            # Administrative access (issue #77's `ResponseCache.clear()` /
+            # `.prune()`, via `ResponseCacheStore`) that isn't tied to any
+            # one run's fingerprint -- never touch `_meta.json`. Every real
+            # caller (checkpoint or dedupe/response_cache) always passes a
+            # real fingerprint string, so this branch is unreachable from
+            # any existing code path.
+            return
         if self.meta_path.exists():
             try:
                 meta = json.loads(self.meta_path.read_text())
@@ -272,12 +280,25 @@ class CheckpointStore:
     def _part_paths(self) -> List[Path]:
         return sorted(self.path.glob("part-*.parquet"))
 
-    def load_index(self) -> Dict[str, Tuple[bool, str]]:
+    def load_index(
+        self, ttl_seconds: Optional[float] = None
+    ) -> Dict[str, Tuple[bool, str]]:
         """Load the store into `key -> (ok, result_raw)`, deduped.
 
         Among entries sharing a key, the latest `ts` wins; exact ties prefer
         `ok=True` (a fresh success over a stale failure written at the same
         instant).
+
+        Parameters
+        ----------
+        ttl_seconds
+            Optional TTL, in seconds, applied on read: entries older than
+            `now - ttl_seconds` are treated as if absent (pending, not a
+            hit). `None` (the default -- what `checkpoint.py` always uses)
+            disables TTL filtering entirely, matching pre-#77 behavior.
+            Added for issue #77's `ResponseCacheStore`, which enforces TTL
+            lazily on every read rather than deleting expired entries
+            eagerly (`prune()` does that on demand).
         """
         parts = self._part_paths()
         if not parts:
@@ -303,6 +324,12 @@ class CheckpointStore:
         df = df.filter(pl.col("fingerprint") == self.fingerprint)
         if df.height == 0:
             return {}
+
+        if ttl_seconds is not None:
+            cutoff = _now_utc() - datetime.timedelta(seconds=ttl_seconds)
+            df = df.filter(pl.col("ts") >= cutoff)
+            if df.height == 0:
+                return {}
 
         # Sort ascending by (key, ts, ok); `False < True` means an ok=True
         # row sorts *after* an ok=False row at the same timestamp, so taking
@@ -408,45 +435,26 @@ def checkpointed_expr(
 
         dtype = s.dtype
         raw_inputs: List[Any] = s.to_list()
-        n = len(raw_inputs)
 
-        keys: List[Optional[str]] = [None] * n
-        for i, v in enumerate(raw_inputs):
-            if v is None:
-                continue
-            hash_source = canonicalize(v) if canonicalize is not None else v
-            keys[i] = content_key(hash_source, fingerprint)
-
-        results: List[Optional[str]] = [None] * n
-        # Ordered de-dup of pending rows by key: identical inputs (including
-        # duplicates already inside this one batch) are only ever sent to
-        # `run_pending` once; every row sharing that key gets the same
-        # result fanned back out below.
-        unique_pending_keys: List[str] = []
-        unique_pending_inputs: List[Any] = []
-        seen_pending: Dict[str, int] = {}
-        key_to_positions: Dict[str, List[int]] = {}
-
-        for i, key in enumerate(keys):
-            if key is None:
-                continue  # null row: passes through as null, never stored
-            hit = index.get(key)
-            if hit is not None:
-                ok, stored_raw = hit
-                if ok or not checkpoint.retry_failed:
-                    results[i] = stored_raw
-                    continue
-            key_to_positions.setdefault(key, []).append(i)
-            if key not in seen_pending:
-                seen_pending[key] = len(unique_pending_keys)
-                unique_pending_keys.append(key)
-                unique_pending_inputs.append(raw_inputs[i])
+        # Grouping/hit-vs-pending bookkeeping is shared with issue #77's
+        # dedupe/response-cache path -- see `polar_llama.keys.plan_collapse`.
+        # `serve_failed=not checkpoint.retry_failed` reproduces the exact
+        # hit rule this loop used to implement inline: an `ok=True` stored
+        # entry is always a hit; an `ok=False` entry is a hit only when
+        # `retry_failed=False` (otherwise it's pending -- retried).
+        plan: CollapsePlan = plan_collapse(
+            raw_inputs,
+            fingerprint,
+            canonicalize=canonicalize,
+            index=index,
+            serve_failed=not checkpoint.retry_failed,
+        )
 
         flush_every = checkpoint.flush_every
-        n_unique = len(unique_pending_keys)
+        n_unique = len(plan.unique_pending_keys)
         for start in range(0, n_unique, flush_every):
-            chunk_keys = unique_pending_keys[start : start + flush_every]
-            chunk_inputs = unique_pending_inputs[start : start + flush_every]
+            chunk_keys = plan.unique_pending_keys[start : start + flush_every]
+            chunk_inputs = plan.unique_pending_inputs[start : start + flush_every]
 
             chunk_series = pl.Series(chunk_inputs, dtype=dtype)
             chunk_result_series = run_pending(chunk_series)
@@ -458,13 +466,13 @@ def checkpointed_expr(
                 is_err, err_type = _is_error_row(raw, has_schema)
                 oks.append(not is_err)
                 errors.append(err_type)
-                for pos in key_to_positions[key]:
-                    results[pos] = raw
+
+            fan_out(plan, chunk_keys, chunk_raws)
 
             # Flush *this chunk* before moving to the next one: a crash
             # loses at most the in-flight chunk's worth of duplicate spend.
             store.append(chunk_keys, chunk_raws, oks, errors)
 
-        return pl.Series(s.name, results, dtype=pl.Utf8)
+        return pl.Series(s.name, plan.results, dtype=pl.Utf8)
 
     return expr.map_batches(_udf, return_dtype=pl.Utf8)
