@@ -4,6 +4,7 @@ pub mod utils;
 pub mod model_client;
 pub mod ann;
 pub mod cost;
+pub mod index;
 pub mod kmeans;
 pub mod mcp;
 pub mod metrics;
@@ -72,6 +73,10 @@ fn polar_llama(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Add the PyProvider class to the module
     m.add_class::<PyProvider>()?;
+
+    // Persistent, incrementally updatable HNSW index (issue #82); wrapped by
+    // `polar_llama.index.HnswIndex`.
+    m.add_class::<index::PyHnswIndex>()?;
 
     // Add the register_expressions function to the module
     m.add_function(wrap_pyfunction!(register_expressions, m)?)?;

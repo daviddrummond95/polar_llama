@@ -602,7 +602,8 @@ df = df.lazy().with_columns([
 
 | Function | Description | Returns |
 |----------|-------------|---------|
-| `knn_hnsw(query, corpus, k)` | K-nearest neighbors via HNSW | List[Int64] indices |
+| `knn_hnsw(query, corpus, k)` | K-nearest neighbors via HNSW (stateless, rebuilds the graph every call) | List[Int64] indices |
+| `HnswIndex.build/add/remove/query/query_one/save/load` | Persistent, incrementally updatable HNSW index (issue #82) -- see [below](#persistent-hnsw-index-hnswindex) | `HnswIndex` / `pl.DataFrame` |
 
 ### Namespace Methods
 
@@ -680,6 +681,170 @@ result = df.with_columns(
 
 ---
 
+## Persistent HNSW Index (`HnswIndex`)
+
+`knn_hnsw` above is **stateless**: every call rebuilds the HNSW graph from
+scratch out of whatever corpus column you pass it. That's fine for a
+one-off query, but wasteful (and, for a large corpus, slow) if you want to
+query the *same* corpus repeatedly, or grow it incrementally over time.
+
+`HnswIndex` (issue #82) is a **persistent, incrementally updatable** index:
+build it once, then `.add()`/`.remove()` points into it, `.query()` it as
+many times as you like, and `.save()`/`HnswIndex.load()` it to/from disk.
+It's a DataFrame-native, stateful, serializable object -- the same shape as
+`Checkpoint` and `Codebook` elsewhere in Polar Llama -- not a Polars
+expression.
+
+### Why not just rebuild the graph every time?
+
+`instant-distance`'s `HnswMap` (what `knn_hnsw` builds under the hood) is
+**immutable** once built -- there is no incremental insert/delete in the
+underlying library. `HnswIndex` layers add/remove on top of that immutable
+graph itself:
+
+- New/updated points (`.add()`) go into a small brute-force **staging
+  buffer**, not the graph -- queryable immediately, without rebuilding
+  anything.
+- Removed points (`.remove()`) are **soft-deleted** (tombstoned), not
+  physically removed -- `.query()` over-fetches from the graph to
+  compensate and filters tombstoned ids out of the results.
+- Periodically (**compaction**, automatic by default, or via `.compact()`)
+  the graph is rebuilt from scratch out of every currently-live point, and
+  the staging buffer / tombstones are cleared.
+
+This means a `.add()`/`.remove()` call is cheap (no full rebuild), at the
+cost of the staging buffer being brute-force-scanned on every query until
+the next compaction -- see [Performance](#performance) below.
+
+### Quick Start
+
+```python
+import polars as pl
+from polar_llama import HnswIndex, embedding_async, Provider
+
+corpus = pl.DataFrame({
+    "doc_id": ["doc-1", "doc-2", "doc-3", "doc-4"],
+    "text": ["AI research", "cooking tips", "machine learning", "recipes"],
+}).with_columns(
+    embedding=embedding_async(pl.col("text"), provider=Provider.OPENAI)
+)
+
+# Build once.
+index = HnswIndex.build(corpus, id_col="doc_id", embedding_col="embedding")
+
+# Query as many times as you like -- no rebuild.
+queries = pl.DataFrame({"q": ["artificial intelligence"]}).with_columns(
+    embedding=embedding_async(pl.col("q"), provider=Provider.OPENAI)
+)
+results = index.query(queries, embedding_col="embedding", k=2)
+# shape: (2, 4) — query_id | neighbor_id | distance | rank
+
+# Grow the index incrementally -- queryable immediately.
+new_docs = pl.DataFrame({
+    "doc_id": ["doc-5"],
+    "text": ["neural networks"],
+}).with_columns(embedding=embedding_async(pl.col("text"), provider=Provider.OPENAI))
+index.add(new_docs, id_col="doc_id", embedding_col="embedding")
+
+# Soft-delete.
+index.remove(["doc-2"])
+assert "doc-2" not in index
+
+# Persist and reload -- identical query results, including any pending
+# (not-yet-compacted) staging/tombstone state.
+index.save("my_index.bin")
+reloaded = HnswIndex.load("my_index.bin")
+```
+
+### API
+
+```python
+HnswIndex.build(df, id_col, embedding_col, *, ef_construction=200, ef_search=200,
+                 seed=42, auto_compact=True, compact_staged_min=1000,
+                 compact_staged_ratio=0.10, compact_tombstone_min=1000,
+                 compact_tombstone_ratio=0.10) -> HnswIndex
+HnswIndex.load(path) -> HnswIndex
+
+index.add(df, id_col, embedding_col) -> int        # rows upserted
+index.remove(ids: list[str] | pl.Series) -> int    # rows soft-deleted
+index.compact() -> None                            # force a rebuild now
+
+index.query(query_df, embedding_col, k=10) -> pl.DataFrame  # query_id | neighbor_id | distance | rank
+index.query_one(vector: list[float], k=10) -> pl.DataFrame  # neighbor_id | distance | rank
+index.knn(expr, k=10) -> pl.Expr                    # List[Struct{neighbor_id, distance, rank}] per row
+
+index.save(path) -> None
+len(index)              # live point count
+index.dim               # embedding dimensionality
+"some_id" in index       # membership check
+index.staged_len         # pending (not-yet-compacted) adds
+index.tombstone_len      # pending (not-yet-compacted) removals
+index.should_compact     # would `.compact()` do real work right now?
+index.auto_compact       # get/set
+```
+
+`.query()`'s `query_id` column is `query_df`'s **0-based row index** --
+there's no separate id parameter for queries, only for the indexed corpus
+(`id_col` on `.build()`/`.add()`).
+
+`.knn()` bridges `.query()`'s batch core into a lazy expression via
+`map_batches`, for use inside `with_columns`:
+
+```python
+queries.with_columns(
+    neighbors=index.knn(pl.col("embedding"), k=5)
+).explode("neighbors").unnest("neighbors")
+```
+
+### Upsert and soft-delete semantics
+
+- **Upsert**: `.add()` with an id already in the index replaces its vector
+  -- the old entry is tombstoned (never mutated in place, since the main
+  graph is immutable) and the new one goes into staging. A duplicate id
+  *within* one `.build()`/`.add()` call resolves last-row-wins.
+- **Soft-delete**: `.remove()` on an id not currently live (unknown, or
+  already removed) is a silent no-op. `k` neighbors are still returned
+  after a removal as long as the index has that many *live* points left --
+  `.query()`'s over-fetch (`k' = min(k + tombstone_count, ef_search)`)
+  exists specifically so removed points don't silently shrink your result
+  count.
+
+### Compaction
+
+`auto_compact=True` (the default) triggers `.compact()` automatically,
+after `.add()`/`.remove()`, once the staging buffer or the tombstone count
+exceeds `max(compact_*_min, compact_*_ratio * len(index))`. Set
+`auto_compact=False` to batch many `.add()`/`.remove()` calls and
+`.compact()` once yourself (cheaper than compacting after every call);
+`index.should_compact` tells you whether a threshold is currently crossed.
+
+### Performance
+
+- **Query**: sub-millisecond to a few milliseconds per query against a
+  compacted 100k-point index (approximate HNSW search, same complexity
+  class as `knn_hnsw`); each un-compacted staged point adds one brute-force
+  distance computation per query, so a large pending staging buffer
+  (thousands of points) is the main way to slow queries down between
+  compactions.
+- **`.save()`/`.load()`**: a low-single-digit number of seconds for a
+  100k-point index (dominated by `bincode` (de)serializing the graph).
+  `instant-distance` has no mmap or lazy-load path, so `.load()` always
+  deserializes the whole graph into memory up front -- there is no
+  partial/streaming load for indexes too large to fit in RAM.
+- See `scripts/bench_hnsw_index.py` for a runnable 100k-point benchmark
+  (not part of the test suite -- it's slow by design).
+
+### When to use `HnswIndex` vs. `knn_hnsw`
+
+| | `knn_hnsw` | `HnswIndex` |
+|---|---|---|
+| Corpus | Rebuilt every call | Built once, updated incrementally |
+| State | None (pure expression) | Stateful object (build/add/remove/save/load) |
+| Best for | One-off query against a corpus you already have in memory | A corpus you query repeatedly, or that grows over time |
+| Persistence | None | `.save()`/`.load()` |
+
+---
+
 ## Examples
 
 Complete runnable examples are available in the `examples/` directory:
@@ -754,5 +919,5 @@ python advanced_semantic_search_demo.py
 
 ---
 
-**Last Updated**: 2025-12-17
-**Version**: 0.2.2
+**Last Updated**: 2026-07-14
+**Version**: 0.8.0
