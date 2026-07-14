@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-14
+
+### Added
+- **Resumable batch runs / checkpointing** (`inference_async(..., checkpoint="path")` and `inference_messages`, issue #75): completed rows are persisted to a sidecar Parquet store as a run progresses, keyed by a sha256 content hash over the row input plus the full run configuration (provider, model, system prompt, response schema, and the endpoint base-URL override). Re-running resumes and skips completed rows, so a job killed at 50% costs ≈ one full pass on resume. Changing any config input invalidates old entries automatically; failed rows are stored as failed and retried by default (`Checkpoint(path, retry_failed=False)` to keep the stored error). The store is crash-durable (atomic append-only Parquet parts) and the API stays a lazy, DataFrame-shaped Polars expression that composes in `with_columns`/`LazyFrame` pipelines. The hashing primitives live in `polar_llama/keys.py` for reuse by content-hash caching (#77). See `docs/design/CHECKPOINTING.md`.
+
 ## [0.6.0] - 2026-07-13
 
 ### Added

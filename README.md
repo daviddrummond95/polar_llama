@@ -226,6 +226,27 @@ print(df.select(
 
 Streaming is text-only: pass `response_model` and you'll get a clear `ValueError` telling you to use `inference_async()` for structured output instead. OpenAI, Groq, and Anthropic stream natively over SSE; Gemini and Bedrock fall back to a single "full response, then done" delta so every provider works with the same API.
 
+#### Resumable Runs (Checkpointing)
+
+Large jobs fail mid-run — rate limits, network blips, provider outages. Pass `checkpoint="path"` and completed rows are persisted to a sidecar store as the run progresses; re-run the same code and it **resumes**, skipping rows that already finished so you pay for roughly one full pass, not two.
+
+```python
+from polar_llama import inference_async, Provider
+
+out = df.with_columns(
+    answer=inference_async(
+        pl.col("prompt"),
+        provider=Provider.OPENAI,
+        model="gpt-4o-mini",
+        checkpoint="run1.ckpt",   # directory of append-only Parquet parts
+    )
+)
+# If this dies at 50%, just run it again — the first 50% is served from
+# the checkpoint and only the remaining rows hit the API.
+```
+
+The checkpoint key hashes the row input **and** the run config (provider, model, prompt, response schema, endpoint), so changing any of them invalidates old entries automatically — you never get a stale result from a different configuration. Failed rows are stored as failed and retried on resume by default (`Checkpoint(path, retry_failed=False)` to return the stored error instead). Works with structured outputs and tool-use passes. See `docs/design/CHECKPOINTING.md`.
+
 #### Local Inference (Apple Silicon / MLX)
 
 Run inference **on-device** on Apple Silicon instead of a provider API — no keys, no network — via [mlx-lm](https://github.com/ml-explore/mlx-lm). Install the extra (Apple Silicon, Python ≥ 3.10):
