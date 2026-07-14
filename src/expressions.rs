@@ -1847,3 +1847,189 @@ fn krippendorffs_alpha_ci(inputs: &[Series], kwargs: AlphaKwargs) -> PolarsResul
 
     build_irr_struct(Some(value), ci_low, ci_high)
 }
+
+// ============================================================================
+// Survey data quality (issue #80)
+// ============================================================================
+//
+// Three row-wise plugin expressions backed by the pure, unit-tested
+// functions in `crate::quality` (mirrors the `src/metrics.rs` split for
+// issue #79): `straightlining_score` (N numeric grid columns),
+// `gibberish_score` (1 string column), `duplicate_answer_score` (N string
+// columns). Every one of these is a *scoring* function, never a filter --
+// null inputs (or "not enough signal") produce a null score, not an error
+// and not a dropped row; thresholding into a boolean flag happens entirely
+// on the Python side (`polar_llama/quality.py::quality_report`).
+//
+// `straightlining_score` needs the Likert scale's `[min, max]` bounds to
+// normalize its variance component. When the caller doesn't supply
+// `scale_min`/`scale_max` explicitly, this infers them from the observed
+// min/max across *all* values in *all* grid columns passed to this one
+// call -- a whole-batch computation, registered `is_elementwise=True`
+// anyway so it composes inside `with_columns` (same documented precedent as
+// `cluster_embeddings` above). `quality_report` always passes explicit
+// bounds computed once over the whole configured column set, precisely so
+// this batch-inference fallback (which could vary with a lazy engine's
+// chunking) is never actually exercised by the DataFrame-level API -- it
+// only matters for a caller using the raw expression standalone.
+
+fn default_min_answers() -> usize {
+    3
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StraightlineKwargs {
+    #[serde(default)]
+    scale_min: Option<f64>,
+    #[serde(default)]
+    scale_max: Option<f64>,
+    #[serde(default = "default_min_answers")]
+    min_answers: usize,
+}
+
+/// Casts every input `Series` to `Float64` and returns one `Vec<f64>` of
+/// finite, non-null values per row (grid answers for that respondent), plus
+/// the flattened set of all finite values across every row/column (used for
+/// batch-wide scale inference when the caller didn't pin `scale_min`/`scale_max`).
+fn gather_numeric_rows(inputs: &[Series]) -> PolarsResult<(Vec<Vec<f64>>, Vec<f64>)> {
+    if inputs.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let n_rows = inputs[0].len();
+
+    let mut columns: Vec<Vec<Option<f64>>> = Vec::with_capacity(inputs.len());
+    for s in inputs {
+        let casted = s.cast(&DataType::Float64)?;
+        let ca = casted.f64()?;
+        columns.push(
+            ca.into_iter()
+                .map(|opt| opt.filter(|v| v.is_finite()))
+                .collect(),
+        );
+    }
+
+    let mut rows: Vec<Vec<f64>> = Vec::with_capacity(n_rows);
+    let mut all_values: Vec<f64> = Vec::new();
+    for row in 0..n_rows {
+        let mut vals = Vec::with_capacity(columns.len());
+        for col in &columns {
+            if let Some(Some(v)) = col.get(row) {
+                vals.push(*v);
+                all_values.push(*v);
+            }
+        }
+        rows.push(vals);
+    }
+    Ok((rows, all_values))
+}
+
+/// Straightlining suspicion score across N grid (Likert) columns -- one
+/// score per respondent (row). See `crate::quality::straightline_score` for
+/// the formula. Rows with fewer than `min_answers` non-null grid answers
+/// score null (never flagged, never dropped).
+#[polars_expr(output_type=Float64)]
+fn straightlining_score(inputs: &[Series], kwargs: StraightlineKwargs) -> PolarsResult<Series> {
+    if inputs.is_empty() {
+        return Ok(Float64Chunked::from_slice_options(PlSmallStr::from_static(""), &[])
+            .into_series());
+    }
+    let name = inputs[0].name().clone();
+    let (rows, all_values) = gather_numeric_rows(inputs)?;
+
+    let (scale_min, scale_max) = match (kwargs.scale_min, kwargs.scale_max) {
+        (Some(lo), Some(hi)) => (lo, hi),
+        _ => {
+            if all_values.is_empty() {
+                (0.0, 0.0)
+            } else {
+                let lo = all_values.iter().cloned().fold(f64::INFINITY, f64::min);
+                let hi = all_values
+                    .iter()
+                    .cloned()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                (
+                    kwargs.scale_min.unwrap_or(lo),
+                    kwargs.scale_max.unwrap_or(hi),
+                )
+            }
+        }
+    };
+
+    let scores: Vec<Option<f64>> = rows
+        .iter()
+        .map(|row| crate::quality::straightline_score(row, scale_min, scale_max, kwargs.min_answers))
+        .collect();
+
+    Ok(Float64Chunked::from_slice_options(name, &scores).into_series())
+}
+
+fn default_gibberish_min_chars() -> usize {
+    8
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GibberishKwargs {
+    #[serde(default = "default_gibberish_min_chars")]
+    min_chars: usize,
+}
+
+/// Keyboard-mash / gibberish suspicion score for one text column. See
+/// `crate::quality::gibberish_score` for the formula and its documented
+/// English-only limitation. Null input, or fewer than `min_chars` letters
+/// surviving normalization, scores null.
+#[polars_expr(output_type=Float64)]
+fn gibberish_score(inputs: &[Series], kwargs: GibberishKwargs) -> PolarsResult<Series> {
+    let ca = inputs[0].str()?;
+    if ca.is_empty() {
+        return Ok(Float64Chunked::from_slice_options(ca.name().clone(), &[]).into_series());
+    }
+    let scores: Vec<Option<f64>> = ca
+        .into_iter()
+        .map(|opt| opt.and_then(|text| crate::quality::gibberish_score(text, kwargs.min_chars)))
+        .collect();
+    Ok(Float64Chunked::from_slice_options(ca.name().clone(), &scores).into_series())
+}
+
+fn default_min_answer_chars() -> usize {
+    10
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DuplicateKwargs {
+    #[serde(default = "default_min_answer_chars")]
+    min_answer_chars: usize,
+}
+
+/// Cross-answer near-duplicate suspicion score across N open-end text
+/// columns -- one score per respondent (row). See
+/// `crate::quality::duplicate_answer_score` for the formula. Rows with
+/// fewer than 2 surviving (non-null, >= `min_answer_chars`) answers score
+/// null.
+#[polars_expr(output_type=Float64)]
+fn duplicate_answer_score(inputs: &[Series], kwargs: DuplicateKwargs) -> PolarsResult<Series> {
+    if inputs.is_empty() {
+        return Ok(Float64Chunked::from_slice_options(PlSmallStr::from_static(""), &[])
+            .into_series());
+    }
+    let name = inputs[0].name().clone();
+    let n_rows = inputs[0].len();
+
+    let string_cols: Vec<&StringChunked> = inputs
+        .iter()
+        .map(|s| s.str())
+        .collect::<PolarsResult<Vec<_>>>()?;
+
+    let mut scores: Vec<Option<f64>> = Vec::with_capacity(n_rows);
+    for row in 0..n_rows {
+        let answers: Vec<&str> = string_cols
+            .iter()
+            .filter_map(|ca| ca.get(row))
+            .collect();
+        scores.push(crate::quality::duplicate_answer_score(
+            &answers,
+            kwargs.min_answer_chars,
+        ));
+    }
+
+    Ok(Float64Chunked::from_slice_options(name, &scores).into_series())
+}

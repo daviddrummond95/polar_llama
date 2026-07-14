@@ -1972,6 +1972,24 @@ from polar_llama.reliability import (
 
 
 # ============================================================================
+# Survey Data-Quality Flags (issue #80) — see docs/QUALITY_FLAGS.md
+# ============================================================================
+
+from polar_llama.quality import (
+    AI_DETECTION_LIMITATION,
+    QualityConfig,
+    QualityReport,
+    ai_likelihood,
+    duplicate_answer_score,
+    gibberish_score,
+    quality_report,
+    response_length_score,
+    speeder_score,
+    straightlining_score,
+)
+
+
+# ============================================================================
 # Tool Use (MCP) — see docs/design/MCP_TOOL_INTEGRATION.md
 # ============================================================================
 
@@ -2333,6 +2351,81 @@ class LlamaNamespace:
         return krippendorffs_alpha(
             [self._expr, *others], level=level, n_bootstrap=n_bootstrap, ci=ci, seed=seed
         )
+
+    def straightlining_score(
+        self,
+        others: List[IntoExpr],
+        *,
+        scale_min: Optional[float] = None,
+        scale_max: Optional[float] = None,
+        min_answers: int = 3,
+    ) -> pl.Expr:
+        """
+        Straightlining suspicion score across this column and other grid
+        (Likert) columns. See `polar_llama.straightlining_score`.
+        """
+        return straightlining_score(
+            [self._expr, *others],
+            scale_min=scale_min,
+            scale_max=scale_max,
+            min_answers=min_answers,
+        )
+
+    def gibberish_score(self, *, min_chars: int = 8) -> pl.Expr:
+        """
+        Keyboard-mash / gibberish suspicion score for this text column.
+        See `polar_llama.gibberish_score`.
+        """
+        return gibberish_score(self._expr, min_chars=min_chars)
+
+    def duplicate_answer_score(
+        self, others: List[IntoExpr], *, min_answer_chars: int = 10
+    ) -> pl.Expr:
+        """
+        Cross-answer near-duplicate suspicion score across this column and
+        other open-end text columns. See `polar_llama.duplicate_answer_score`.
+        """
+        return duplicate_answer_score(
+            [self._expr, *others], min_answer_chars=min_answer_chars
+        )
+
+    def response_length_score(self, *, rz_cap: float = 3.0) -> pl.Expr:
+        """
+        Response-length outlier suspicion score for this text column. See
+        `polar_llama.response_length_score`.
+        """
+        return response_length_score(self._expr, rz_cap=rz_cap)
+
+    def speeder_score(
+        self,
+        *,
+        percentile: float = 0.05,
+        min_duration_seconds: Optional[float] = None,
+        median_fraction: Optional[float] = None,
+    ) -> pl.Expr:
+        """
+        Speeder suspicion score for this duration column. See
+        `polar_llama.speeder_score`.
+        """
+        return speeder_score(
+            self._expr,
+            percentile=percentile,
+            min_duration_seconds=min_duration_seconds,
+            median_fraction=median_fraction,
+        )
+
+    def ai_likelihood(
+        self,
+        *,
+        provider: Optional[Union[str, Provider]] = None,
+        model: Optional[str] = None,
+    ) -> pl.Expr:
+        """
+        AI-generated-text likelihood score for this text column (flag, not
+        verdict -- see `polar_llama.ai_likelihood` for the mandatory
+        limitation discussion).
+        """
+        return ai_likelihood(self._expr, provider=provider, model=model)
 
     def dot_product(self, other: IntoExpr) -> pl.Expr:
         """
