@@ -35,6 +35,26 @@ callback (explicitly deferred; not needed to meet the "kill at 50%, resume,
 re-spend at most ~flush_every rows" acceptance bar). `flush_every` (default
 100) bounds the worst case.
 
+Usage/cost accounting interop (issue #76): `inference_async`/`inference_messages`
+raise `ValueError` if both `checkpoint=...` and `usage=True` are passed
+together. Reason: `usage=True` wraps every row in a JSON envelope
+(`{"response": ..., "usage": {...}}`, see `src/model_client/mod.rs`), but
+`_is_error_row` below only recognizes a failed row by a TOP-LEVEL
+`{"_error": ...}` shape -- under the envelope, a failed row's error object is
+nested one level deeper (`{"response": {"_error": ...}, "usage": {...}}`),
+so a stored envelope-wrapped error row would be misclassified as `ok=True`
+and never retried on resume. Combining the two is designed to be supportable
+(the store already persists the raw plugin string -- whatever it is -- so a
+resumed usage=True run would naturally re-serve prior tokens/latency and
+recompute `cost_usd` at decode time against whatever price table is active
+at resume, which is desirable for invoicing), but making it correct requires
+threading a `has_usage: bool` through this module (a "look one level under
+`response`" branch in `_is_error_row`) and adding `"usage": bool` to the
+checkpoint fingerprint (`polar_llama/keys.py::config_fingerprint`'s `extra`)
+so a usage=False store can never be resumed as usage=True or vice versa
+(rows would otherwise fail envelope decode). Deferred as follow-up work;
+tracked in the issue #76 design doc.
+
 Known risk: nesting an eager `DataFrame.select(...)` of a plugin expression
 inside a `map_batches` UDF could, in principle, contend with Polars' rayon
 thread pool on some versions if the plugin itself dispatched rayon work. It

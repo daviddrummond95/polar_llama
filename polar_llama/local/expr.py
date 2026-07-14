@@ -22,11 +22,16 @@ Two backends:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import polars as pl
 
-from polar_llama.local.engine import generate_chunked, get_engine
+from polar_llama.local.engine import (
+    generate_chunked,
+    generate_chunked_with_usage,
+    get_engine,
+)
 
 if TYPE_CHECKING:
     from polars.type_aliases import IntoExpr
@@ -70,6 +75,8 @@ def inference_local(
     temperature: float = 0.0,
     top_p: float = 1.0,
     stop: Optional[List[str]] = None,
+    usage: bool = False,
+    price_table: Optional[Union[Dict[str, Any], str, Path]] = None,
 ) -> pl.Expr:
     """Run local inference over a text column, returning String completions.
 
@@ -93,11 +100,26 @@ def inference_local(
         only).
     max_tokens, temperature, top_p, stop
         Sampling parameters.
+    usage
+        Issue #76: enable per-row usage/cost accounting. When True, the
+        return dtype changes from ``Utf8`` to
+        ``Struct{response: Utf8, usage: USAGE_DTYPE}``.
+        For ``engine="in_process"``, tokens are whitespace counts of the
+        prompt/completion (see ``LocalEngine.generate_with_usage``),
+        ``latency_ms`` is measured with ``time.perf_counter()``, and
+        ``cost_usd`` is ALWAYS ``0.0`` (no network cost for a model running
+        on this machine). For ``engine="server"``, this is forwarded as-is
+        to ``inference_local_server`` -- see its ``usage`` parameter for the
+        (non-zero-cost-by-default) semantics there.
+    price_table
+        Per-call cost-resolution override (``usage=True``, ``engine="server"``
+        only -- ignored for ``engine="in_process"``, whose cost is always 0.0).
 
     Returns
     -------
     polars.Expr
-        A String expression of completions, in the original row order.
+        A String expression of completions, in the original row order (or a
+        usage-struct column when ``usage=True``; see above).
     """
     if engine == "server":
         # Imported lazily: this backend is owned by a separate agent and may not
@@ -113,6 +135,8 @@ def inference_local(
             temperature=temperature,
             top_p=top_p,
             stop=stop,
+            usage=usage,
+            price_table=price_table,
         )
 
     if engine in ("in_process", "mlx", "mlx_batch", "fake"):
@@ -125,11 +149,10 @@ def inference_local(
             temperature=temperature,
             top_p=top_p,
             stop=stop,
+            usage=usage,
         )
 
-    raise ValueError(
-        f"Unknown engine {engine!r}; expected 'server' or 'in_process'."
-    )
+    raise ValueError(f"Unknown engine {engine!r}; expected 'server' or 'in_process'.")
 
 
 def _inference_local_in_process(
@@ -142,9 +165,62 @@ def _inference_local_in_process(
     temperature: float,
     top_p: float,
     stop: Optional[List[str]],
+    usage: bool = False,
 ) -> pl.Expr:
     parsed = _parse_into_expr(expr)
     stop_list: Optional[List[str]] = list(stop) if stop else None
+
+    if usage:
+        # Imported lazily (not at module top-level) so this module keeps
+        # importing cleanly even in the unlikely event of a future circular
+        # import; by the time `inference_local` is called, `polar_llama`'s
+        # top-level package is always already fully initialized (it can only
+        # reach this lazily-imported module through its own __init__).
+        from polar_llama import USAGE_DTYPE
+
+        full_dtype = pl.Struct({"response": pl.Utf8, "usage": USAGE_DTYPE})
+
+        def _udf_with_usage(series: pl.Series) -> pl.Series:
+            texts = series.to_list()
+
+            prompts: List[str] = []
+            positions: List[int] = []
+            for idx, text in enumerate(texts):
+                prompt = _build_prompt(text, system)
+                if prompt is None:
+                    continue
+                positions.append(idx)
+                prompts.append(prompt)
+
+            out: List[Optional[Dict[str, Any]]] = [None] * len(texts)
+
+            if prompts:
+                local_engine = get_engine(model, engine)
+                completions = generate_chunked_with_usage(
+                    local_engine,
+                    prompts,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop=stop_list,
+                )
+                for pos, (text_out, row_usage) in zip(positions, completions):
+                    out[pos] = {
+                        "response": text_out,
+                        "usage": {
+                            "input_tokens": row_usage.get("input_tokens"),
+                            "output_tokens": row_usage.get("output_tokens"),
+                            "cached_tokens": None,
+                            "latency_ms": row_usage.get("latency_ms"),
+                            # No network cost for a model running on this
+                            # machine -- always 0.0, never looked up.
+                            "cost_usd": 0.0,
+                        },
+                    }
+
+            return pl.Series(series.name, out, dtype=full_dtype)
+
+        return parsed.map_batches(_udf_with_usage, return_dtype=full_dtype)
 
     def _udf(series: pl.Series) -> pl.Series:
         texts = series.to_list()

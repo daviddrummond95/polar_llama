@@ -118,6 +118,38 @@ pub async fn fetch_data_message_arrays_with_provider_and_schema(
 }
 
 // ============================================================================
+// Usage-accounting (issue #76) wrappers: identical to the functions above,
+// with a `with_usage` flag threaded through to
+// `fetch_data_generic_with_options` / `fetch_data_generic_enhanced_with_options`.
+// `with_usage=false` is byte-identical to calling the functions above
+// (same `errors_as_json` pairing: `schema.is_some()`).
+// ============================================================================
+
+pub async fn fetch_data_with_provider_opts(
+    messages: &[String],
+    provider: Provider,
+    model: &str,
+    schema: Option<&str>,
+    model_name: Option<&str>,
+    with_usage: bool,
+) -> Vec<Option<String>> {
+    let client = create_client(provider, model);
+    model_client::fetch_data_generic_with_options(&*client, messages, schema, model_name, with_usage).await
+}
+
+pub async fn fetch_data_message_arrays_with_provider_opts(
+    message_arrays: &[Vec<Message>],
+    provider: Provider,
+    model: &str,
+    schema: Option<&str>,
+    model_name: Option<&str>,
+    with_usage: bool,
+) -> Vec<Option<String>> {
+    let client = create_client(provider, model);
+    model_client::fetch_data_generic_enhanced_with_options(&*client, message_arrays, schema, model_name, with_usage).await
+}
+
+// ============================================================================
 // Embedding Functions
 // ============================================================================
 
@@ -151,6 +183,7 @@ pub async fn fetch_with_cache_warming(
     model: &str,
     response_schema: Option<&str>,
     response_model_name: Option<&str>,
+    with_usage: bool,
 ) -> Vec<Option<String>> {
     if message_arrays.is_empty() {
         return vec![];
@@ -160,39 +193,56 @@ pub async fn fetch_with_cache_warming(
     // Reuse the shared pooled client (rustls + OS cert store); no per-call TLS bypass.
     let reqwest_client = model_client::http_client().clone();
 
-    // Step 1: Process first request to warm the cache
-    let first_result = if let Some(schema) = response_schema {
-        client.send_request_structured(
-            &reqwest_client,
-            &message_arrays[0],
-            Some(schema),
-            response_model_name,
-        ).await
-    } else {
-        client.send_request(&reqwest_client, &message_arrays[0]).await
-    };
+    // Step 1: Process first request to warm the cache. Always goes through
+    // the usage-aware send (issue #76): for `with_usage=false` the captured
+    // `Usage` is simply discarded below, so behavior is unchanged from the
+    // pre-#76 `send_request_structured`/`send_request` split.
+    let first_result = client.send_request_structured_with_usage(
+        &reqwest_client,
+        &message_arrays[0],
+        response_schema,
+        response_model_name,
+    ).await;
 
     let first_result = match first_result {
-        Ok(response) => {
+        Ok((response, usage)) => {
             // Validate if schema is provided
             if let Some(schema_str) = response_schema {
                 match model_client::validate_json_schema(&response, schema_str) {
-                    Ok(_) => Some(response),
+                    Ok(_) => Some(if with_usage {
+                        model_client::wrap_usage_envelope(&response, true, usage.as_ref())
+                    } else {
+                        response
+                    }),
                     Err(validation_error) => {
-                        Some(model_client::create_error_response(
+                        let err = model_client::create_error_response(
                             "validation_failed",
                             &validation_error,
                             Some(&response),
-                        ))
+                        );
+                        Some(if with_usage {
+                            model_client::wrap_usage_envelope(&err, true, usage.as_ref())
+                        } else {
+                            err
+                        })
                     }
                 }
             } else {
-                Some(response)
+                Some(if with_usage {
+                    model_client::wrap_usage_envelope(&response, false, usage.as_ref())
+                } else {
+                    response
+                })
             }
         }
         Err(e) => {
             eprintln!("Error fetching from {} (cache warming): {}", provider.as_str(), e);
-            Some(model_client::create_error_response("api_error", &e.to_string(), None))
+            let err = model_client::create_error_response("api_error", &e.to_string(), None);
+            Some(if with_usage {
+                model_client::wrap_usage_envelope(&err, true, None)
+            } else {
+                err
+            })
         }
     };
 
@@ -210,38 +260,52 @@ pub async fn fetch_with_cache_warming(
                 let model_name_owned = response_model_name.map(|s| s.to_string());
 
                 async move {
-                    let result = if let Some(schema) = schema_owned.as_deref() {
-                        client.send_request_structured(
-                            &reqwest_client,
-                            &messages,
-                            Some(schema),
-                            model_name_owned.as_deref(),
-                        ).await
-                    } else {
-                        client.send_request(&reqwest_client, &messages).await
-                    };
+                    let result = client.send_request_structured_with_usage(
+                        &reqwest_client,
+                        &messages,
+                        schema_owned.as_deref(),
+                        model_name_owned.as_deref(),
+                    ).await;
 
                     match result {
-                        Ok(response) => {
+                        Ok((response, usage)) => {
                             // Validate if schema is provided
                             if let Some(schema_str) = schema_owned.as_deref() {
                                 match model_client::validate_json_schema(&response, schema_str) {
-                                    Ok(_) => Some(response),
+                                    Ok(_) => Some(if with_usage {
+                                        model_client::wrap_usage_envelope(&response, true, usage.as_ref())
+                                    } else {
+                                        response
+                                    }),
                                     Err(validation_error) => {
-                                        Some(model_client::create_error_response(
+                                        let err = model_client::create_error_response(
                                             "validation_failed",
                                             &validation_error,
                                             Some(&response),
-                                        ))
+                                        );
+                                        Some(if with_usage {
+                                            model_client::wrap_usage_envelope(&err, true, usage.as_ref())
+                                        } else {
+                                            err
+                                        })
                                     }
                                 }
                             } else {
-                                Some(response)
+                                Some(if with_usage {
+                                    model_client::wrap_usage_envelope(&response, false, usage.as_ref())
+                                } else {
+                                    response
+                                })
                             }
                         }
                         Err(e) => {
                             eprintln!("Error fetching from {}: {}", provider.as_str(), e);
-                            Some(model_client::create_error_response("api_error", &e.to_string(), None))
+                            let err = model_client::create_error_response("api_error", &e.to_string(), None);
+                            Some(if with_usage {
+                                model_client::wrap_usage_envelope(&err, true, None)
+                            } else {
+                                err
+                            })
                         }
                     }
                 }

@@ -14,6 +14,8 @@ from polar_llama.keys import (
     canonicalize_messages_input,
     endpoint_fingerprint_input,
 )
+from polar_llama import pricing
+from polar_llama.pricing import register_model_price, set_price_table
 
 if TYPE_CHECKING:
     from polars.type_aliases import IntoExpr
@@ -294,6 +296,119 @@ def _parse_json_to_struct(json_str_series: pl.Series, dtype: pl.DataType) -> pl.
 
 
 # ============================================================================
+# Usage & Cost Accounting (issue #76)
+# ============================================================================
+
+#: Per-row usage/cost struct dtype returned as the `usage` field when
+#: `usage=True` is passed to `inference_async` / `inference_messages`.
+#: `cost_usd` is computed in Python (never emitted by the Rust plugin, which
+#: only carries token counts + latency); `null` when the (provider, model)
+#: pair has no known price (see `polar_llama.pricing`).
+USAGE_DTYPE = pl.Struct(
+    {
+        "input_tokens": pl.Int64,
+        "output_tokens": pl.Int64,
+        "cached_tokens": pl.Int64,
+        "latency_ms": pl.Int64,
+        "cost_usd": pl.Float64,
+    }
+)
+
+#: The envelope's `usage` sub-struct as emitted by the Rust plugin (no
+#: `cost_usd` -- that's computed Python-side in `_decode_usage_envelope`).
+_ENVELOPE_USAGE_DTYPE = pl.Struct(
+    {
+        "input_tokens": pl.Int64,
+        "output_tokens": pl.Int64,
+        "cached_tokens": pl.Int64,
+        "latency_ms": pl.Int64,
+    }
+)
+
+
+def _decode_usage_envelope(
+    json_str_series: pl.Series,
+    response_dtype: pl.DataType,
+    provider: Optional[str],
+    model: Optional[str],
+    price_table_override: Optional[Union[Dict[str, Any], str, Path]],
+) -> pl.Series:
+    """Decode the `usage=True` JSON envelope into `Struct{response, usage}`.
+
+    `usage=True` makes the Rust plugin emit, per row, a JSON envelope string
+    `{"response": ..., "usage": {"input_tokens", "output_tokens",
+    "cached_tokens", "latency_ms"}}` -- the same round-trip mechanism already
+    used for structured output / in-band errors (`create_error_response` ->
+    `_parse_json_to_struct`). This decodes that envelope with a single
+    `str.json_decode(dtype=...)` call and appends a vectorized `cost_usd`
+    computed from the resolved price for (provider, model) -- price
+    resolution happens once per call (provider/model are per-call constants
+    for a given expression), so the cost math is pure column arithmetic.
+
+    Null input rows decode to a null envelope (`_parse_json_to_struct`
+    preserves nulls); the null-ness of the row is explicitly re-propagated to
+    the final output (constructing `pl.struct(...)` from all-null fields
+    would otherwise produce a non-null struct with null fields, not a null
+    struct row).
+    """
+    envelope_dtype = pl.Struct(
+        {"response": response_dtype, "usage": _ENVELOPE_USAGE_DTYPE}
+    )
+    full_dtype = pl.Struct({"response": response_dtype, "usage": USAGE_DTYPE})
+
+    decoded = _parse_json_to_struct(json_str_series, envelope_dtype)
+
+    resolved_model = pricing.effective_model(provider, model)
+    price = pricing.resolve_price(provider, resolved_model, price_table_override)
+    if price is None:
+        pricing.warn_unknown_model_once(provider, resolved_model)
+
+    df = pl.DataFrame({"__env": decoded})
+
+    env = pl.col("__env")
+    usage = env.struct.field("usage")
+    input_f = usage.struct.field("input_tokens")
+    output_f = usage.struct.field("output_tokens")
+    cached_f = usage.struct.field("cached_tokens")
+    latency_f = usage.struct.field("latency_ms")
+
+    if price is not None:
+        cached_or_zero = cached_f.fill_null(0)
+        non_cached = (input_f.fill_null(0) - cached_or_zero).clip(lower_bound=0)
+        cost_expr = (
+            non_cached * price.input_per_1m
+            + cached_or_zero * price.effective_cached_input_per_1m()
+            + output_f.fill_null(0) * price.output_per_1m
+        ) / 1_000_000.0
+        # No usage info at all (provider omitted the block entirely) ->
+        # cost stays null rather than reporting a misleading $0.00.
+        cost_expr = (
+            pl.when(input_f.is_null() & output_f.is_null())
+            .then(pl.lit(None, dtype=pl.Float64))
+            .otherwise(cost_expr)
+        )
+    else:
+        cost_expr = pl.lit(None, dtype=pl.Float64)
+
+    built = pl.struct(
+        response=env.struct.field("response"),
+        usage=pl.struct(
+            input_tokens=input_f,
+            output_tokens=output_f,
+            cached_tokens=cached_f,
+            latency_ms=latency_f,
+            cost_usd=cost_expr,
+        ),
+    )
+
+    result_expr = (
+        pl.when(env.is_null()).then(pl.lit(None, dtype=full_dtype)).otherwise(built)
+    )
+
+    return df.select(result_expr.alias("__out"))["__out"]
+
+
+# ============================================================================
 # Taxonomy-based Tagging
 # ============================================================================
 
@@ -509,6 +624,8 @@ def inference_async(
     cache: Union[bool, CacheConfig] = False,
     system_prompt: Optional[str] = None,
     checkpoint: Optional[Union[str, Path, Checkpoint]] = None,
+    usage: bool = False,
+    price_table: Optional[Union[Dict[str, Any], str, Path]] = None,
 ) -> pl.Expr:
     """
     Asynchronously infer completions for the given text expressions using an LLM.
@@ -579,14 +696,62 @@ def inference_async(
             ...         pl.col("prompt"), checkpoint="runs/batch1.ckpt"
             ...     )
             ... )
+    usage : bool, optional
+        Enable per-row usage/cost accounting (issue #76). When True, the
+        result is composed with a ``usage`` struct field:
+        ``Struct{response: Utf8 (or the response_model struct), usage:
+        USAGE_DTYPE}`` where ``USAGE_DTYPE`` is
+        ``Struct{input_tokens, output_tokens, cached_tokens, latency_ms:
+        Int64, cost_usd: Float64}``. Every usage field is nullable -- a
+        provider that omits its usage block (or a parse failure) leaves the
+        corresponding field null, never an error. ``cost_usd`` is computed
+        from a packaged price table (overridable via ``price_table=``);
+        unknown (provider, model) pairs get a null ``cost_usd`` and a
+        one-time ``UserWarning``. Default: False (byte-identical to the
+        pre-#76 output -- no envelope, no extra column).
+
+        Not currently supported together with ``checkpoint=`` (raises
+        ``ValueError``): the checkpoint store's failed-row detection
+        (``polar_llama.checkpoint._is_error_row``) inspects the raw stored
+        string for a top-level ``{"_error": ...}`` shape, which the usage
+        envelope wraps one level deeper (``{"response": {"_error": ...},
+        "usage": {...}}``) -- combining the two today would silently stop
+        retrying failed rows on resume. Tracked as follow-up work (issue #76
+        design doc, checkpoint interop section).
+
+        Aggregation recipes::
+
+            >>> # Total cost for the job
+            >>> df["r"].struct.field("usage").struct.field("cost_usd").sum()
+            >>> # Cost per 1k rows
+            >>> total_cost / (df.height / 1000)
+            >>> # Cache hit-rate
+            >>> u = df["r"].struct.field("usage")
+            >>> u.struct.field("cached_tokens").sum() / u.struct.field("input_tokens").sum()
+    price_table : dict, str, or Path, optional
+        Per-call override for cost resolution (``usage=True`` only).
+        Resolution order: this override > the process-wide registry
+        (``polar_llama.register_model_price`` / ``set_price_table``) > the
+        packaged default table. Same shape as the packaged
+        ``polar_llama/data/prices.json``: ``{"<provider>": {"<model>":
+        {"input_per_1m": ..., "output_per_1m": ..., "cached_input_per_1m":
+        ...}}}``.
 
     Returns
     -------
     polars.Expr
-        Expression with inferred completions as a Struct (if response_model provided)
-        or String (if no response_model)
+        Expression with inferred completions as a Struct (if response_model
+        or usage=True provided) or String (otherwise)
     """
     expr = parse_into_expr(expr)
+
+    if checkpoint is not None and usage:
+        raise ValueError(
+            "inference_async: usage=True is not currently supported together "
+            "with checkpoint=... (the checkpoint store's failed-row detection "
+            "does not look inside the usage envelope -- see the `usage` "
+            "parameter docstring). Use one or the other for now."
+        )
 
     # Convert Provider to string to make it picklable. All keys are always
     # present (None values deserialize to Option::None) because polars
@@ -599,6 +764,7 @@ def inference_async(
         "model": model,
         "response_schema": None,
         "response_model_name": None,
+        "usage": bool(usage),
     }
 
     # Handle response_format alias
@@ -667,9 +833,19 @@ def inference_async(
             kwargs=kwargs,
         )
 
-    # If response_model was provided, convert JSON strings to structs
-    if struct_dtype is not None:
-        # Use map_batches to convert the JSON string series to struct series
+    if usage:
+        # usage=True subsumes the response_model struct decode: a single
+        # json_decode of the composed envelope dtype handles both.
+        response_dtype = struct_dtype if struct_dtype is not None else pl.Utf8
+        result_expr = result_expr.map_batches(
+            lambda s: _decode_usage_envelope(
+                s, response_dtype, provider, model, price_table
+            ),
+            return_dtype=pl.Struct({"response": response_dtype, "usage": USAGE_DTYPE}),
+        )
+    elif struct_dtype is not None:
+        # If response_model was provided (and usage=False), convert JSON
+        # strings to structs.
         result_expr = result_expr.map_batches(
             lambda s: _parse_json_to_struct(s, struct_dtype), return_dtype=struct_dtype
         )
@@ -777,6 +953,8 @@ def inference_messages(
     response_format: Optional[Type["BaseModel"]] = None,
     cache: Union[bool, CacheConfig] = False,
     checkpoint: Optional[Union[str, Path, Checkpoint]] = None,
+    usage: bool = False,
+    price_table: Optional[Union[Dict[str, Any], str, Path]] = None,
 ) -> pl.Expr:
     """
     Process message arrays (conversations) for inference using LLMs.
@@ -825,19 +1003,35 @@ def inference_messages(
         rows are canonicalized to the same content key when their decoded
         conversation content is identical, so the two input shapes share
         checkpoint entries.
+    usage : bool, optional
+        Enable per-row usage/cost accounting (issue #76). See
+        ``inference_async`` for the full description; behaves identically
+        here. Not currently supported together with ``checkpoint=`` (raises
+        ``ValueError`` -- see the ``inference_async`` docstring for why).
+    price_table : dict, str, or Path, optional
+        Per-call cost-resolution override (``usage=True`` only). See
+        ``inference_async``.
 
     Returns
     -------
     polars.Expr
-        Expression with inferred completions as a Struct (if response_model provided)
-        or String (if no response_model)
+        Expression with inferred completions as a Struct (if response_model
+        or usage=True provided) or String (otherwise)
     """
     expr = parse_into_expr(expr)
+
+    if checkpoint is not None and usage:
+        raise ValueError(
+            "inference_messages: usage=True is not currently supported "
+            "together with checkpoint=... (see the `usage` parameter "
+            "docstring on inference_async for why). Use one or the other "
+            "for now."
+        )
 
     # Both JSON-string input and List(Struct{role, content}) input are handled
     # natively by the Rust `inference_messages` expression, so no Python UDF
     # (map_batches) is needed here — the default path stays lazy/streaming
-    # (unless checkpointing is requested, which always needs a UDF).
+    # (unless checkpointing or usage=True is requested, both of which need a UDF).
 
     # Convert Provider to string to make it picklable. All keys are always
     # present (None values deserialize to Option::None) because polars
@@ -850,6 +1044,7 @@ def inference_messages(
         "model": model,
         "response_schema": None,
         "response_model_name": None,
+        "usage": bool(usage),
     }
 
     # Handle response_format alias
@@ -913,9 +1108,19 @@ def inference_messages(
             kwargs=kwargs,
         )
 
-    # If response_model was provided, convert JSON strings to structs
-    if struct_dtype is not None:
-        # Use map_batches to convert the JSON string series to struct series
+    if usage:
+        # usage=True subsumes the response_model struct decode (single
+        # json_decode of the composed envelope dtype).
+        response_dtype = struct_dtype if struct_dtype is not None else pl.Utf8
+        result_expr = result_expr.map_batches(
+            lambda s: _decode_usage_envelope(
+                s, response_dtype, provider, model, price_table
+            ),
+            return_dtype=pl.Struct({"response": response_dtype, "usage": USAGE_DTYPE}),
+        )
+    elif struct_dtype is not None:
+        # If response_model was provided (and usage=False), convert JSON
+        # strings to structs.
         result_expr = result_expr.map_batches(
             lambda s: _parse_json_to_struct(s, struct_dtype), return_dtype=struct_dtype
         )
@@ -984,6 +1189,15 @@ def inference_stream(
     response_model, response_format : optional
         Not supported by streaming. Passing either raises ``ValueError``
         immediately -- use ``inference_async`` for structured output.
+
+    Notes
+    -----
+    Usage/cost accounting (issue #76, ``inference_async``'s ``usage=``
+    parameter) is explicitly OUT OF SCOPE for streaming -- there is no
+    ``usage`` parameter here and ``STREAM_RESPONSE_DTYPE`` is unchanged.
+    Future work could extend ``StreamEvent``/``streaming.rs`` to surface
+    OpenAI's ``stream_options.include_usage`` final SSE chunk and
+    Anthropic's ``message_delta.usage`` event, but that is a separate change.
 
     Returns
     -------
@@ -1624,6 +1838,8 @@ class LlamaNamespace:
         cache: Union[bool, CacheConfig] = False,
         system_prompt: Optional[str] = None,
         checkpoint: Optional[Union[str, Path, Checkpoint]] = None,
+        usage: bool = False,
+        price_table: Optional[Union[Dict[str, Any], str, Path]] = None,
     ) -> pl.Expr:
         """
         Asynchronously infer completions for the expression using an LLM.
@@ -1646,6 +1862,11 @@ class LlamaNamespace:
         checkpoint : str, Path, or Checkpoint, optional
             Enable resumable batch checkpointing (see the functional
             ``inference_async`` for details).
+        usage : bool, optional
+            Enable per-row usage/cost accounting (see the functional
+            ``inference_async`` for details).
+        price_table : dict, str, or Path, optional
+            Per-call cost-resolution override (``usage=True`` only).
 
         Returns
         -------
@@ -1660,6 +1881,8 @@ class LlamaNamespace:
             cache=cache,
             system_prompt=system_prompt,
             checkpoint=checkpoint,
+            usage=usage,
+            price_table=price_table,
         )
 
     def inference_stream(
@@ -1693,6 +1916,8 @@ class LlamaNamespace:
         temperature: float = 0.0,
         top_p: float = 1.0,
         stop: Optional[List[str]] = None,
+        usage: bool = False,
+        price_table: Optional[Union[Dict[str, Any], str, Path]] = None,
     ) -> pl.Expr:
         """
         Infer completions for the expression using a local model.
@@ -1727,11 +1952,22 @@ class LlamaNamespace:
             Nucleus sampling probability (default: 1.0).
         stop : list of str, optional
             Stop sequences that halt generation.
+        usage : bool, optional
+            Enable per-row usage/cost accounting (issue #76). See
+            ``polar_llama.local.expr.inference_local`` for the full
+            description -- ``engine="in_process"`` always reports
+            ``cost_usd=0.0``; ``engine="server"`` resolves cost from the
+            price table (usually null for a local model name unless you
+            register one).
+        price_table : dict, str, or Path, optional
+            Per-call cost-resolution override (``usage=True``,
+            ``engine="server"`` only).
 
         Returns
         -------
         polars.Expr
-            Expression with String completions, in the original row order.
+            Expression with String completions, in the original row order
+            (or a usage-struct column when ``usage=True``).
         """
         # Imported lazily so that a top-level ``import polar_llama`` never pulls
         # in the local backend (and therefore never risks importing mlx).
@@ -1743,6 +1979,8 @@ class LlamaNamespace:
             system=system,
             engine=engine,
             base_url=base_url,
+            usage=usage,
+            price_table=price_table,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,

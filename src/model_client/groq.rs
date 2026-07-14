@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
-use super::{ModelClient, ModelClientError, Message, Provider};
+use super::{ModelClient, ModelClientError, Message, Provider, Usage};
 use super::streaming::{self, StreamEvent};
 use serde::Deserialize;
 use reqwest::Client;
@@ -117,6 +117,23 @@ impl ModelClient for GroqClient {
             .next()
             .and_then(|choice| choice.message.content)
             .ok_or_else(|| ModelClientError::ParseError("No response content".to_string()))
+    }
+
+    fn parse_usage(&self, response_text: &str) -> Option<Usage> {
+        // Groq is OpenAI-response-shape-compatible; `prompt_tokens_details`
+        // is usually absent (Groq rarely reports a cache hit), which reads
+        // as `cached_tokens: None` -- never an error.
+        let v: Value = serde_json::from_str(response_text).ok()?;
+        let usage = v.get("usage")?;
+        Some(Usage {
+            input_tokens: usage.get("prompt_tokens").and_then(Value::as_i64),
+            output_tokens: usage.get("completion_tokens").and_then(Value::as_i64),
+            cached_tokens: usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(Value::as_i64),
+            latency_ms: None,
+        })
     }
 
     async fn send_request_streaming(
