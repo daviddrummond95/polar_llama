@@ -1594,6 +1594,83 @@ def embedding_async(
     )
 
 
+def embedding_local(
+    expr: IntoExpr,
+    *,
+    model: str = "mlx-community/bge-small-en-v1.5-bf16",
+    engine: str = "in_process",
+    batch_size: int = 64,
+    normalize: bool = True,
+) -> pl.Expr:
+    """
+    Generate embeddings for the given text expression using a local (offline)
+    model, instead of calling a hosted provider API.
+
+    The fully-offline counterpart of :func:`embedding_async` (issue #83):
+    runs an embedding model in this process via ``mlx_embeddings``. Output
+    dtype is ``List[Float64]``, identical to ``embedding_async`` -- a column
+    produced by either function is a drop-in input to ``cosine_similarity``,
+    ``knn_hnsw``, ``HnswIndex``, and ``cluster_embeddings``.
+
+    Requires the optional ``[local]`` extra on Apple silicon
+    (``pip install polar-llama[local]``); importing ``polar_llama`` (or even
+    calling this function with ``engine="fake"`` /
+    ``POLAR_LLAMA_LOCAL_ENGINE=fake``) never requires ``mlx``/``mlx_embeddings``
+    to be installed. See docs/LOCAL_EMBEDDINGS.md.
+
+    Parameters
+    ----------
+    expr : polars.Expr
+        The text expression to generate embeddings for.
+    model : str, optional
+        An ``mlx-community`` (or other mlx-embeddings-compatible) model repo
+        id. Defaults to a small BGE conversion (384 dims); downloads once
+        from the HF Hub on first use and is cached under
+        ``~/.cache/huggingface``.
+    engine : str, optional
+        ``"in_process"`` (default, alias ``"mlx"``) uses the real
+        ``mlx_embeddings`` model. ``"fake"`` forces the dependency-free
+        deterministic engine (also reachable via the
+        ``POLAR_LLAMA_LOCAL_ENGINE=fake`` environment override).
+    batch_size : int, optional
+        Number of texts handed to the model per call; larger columns are
+        processed in row-aligned chunks of this size (default 64).
+    normalize : bool, optional
+        L2-normalize each output vector (default ``True``).
+
+    Returns
+    -------
+    polars.Expr
+        Expression with embeddings as ``List[Float64]`` (vector of floats),
+        in the original row order. A null input row (or a per-row engine
+        failure) produces a null output row.
+
+    Examples
+    --------
+    >>> import polars as pl
+    >>> from polar_llama import embedding_local
+    >>>
+    >>> df = pl.DataFrame({
+    ...     "text": ["Hello world", "Machine learning is fun"]
+    ... })
+    >>>
+    >>> result = df.with_columns(
+    ...     embeddings=embedding_local(pl.col("text"))
+    ... )
+    """
+    # Imported lazily so that a top-level `import polar_llama` never pulls in
+    # the local backend (and therefore never risks importing mlx).
+    from polar_llama.local.embed import embedding_local as _embedding_local
+
+    return _embedding_local(
+        expr,
+        model=model,
+        engine=engine,
+        batch_size=batch_size,
+        normalize=normalize,
+    )
+
+
 def cosine_similarity(
     expr1: IntoExpr,
     expr2: IntoExpr,
@@ -2298,6 +2375,45 @@ class LlamaNamespace:
             Expression with embeddings as List[Float64]
         """
         return embedding_async(self._expr, provider=provider, model=model)
+
+    def embedding_local(
+        self,
+        *,
+        model: str = "mlx-community/bge-small-en-v1.5-bf16",
+        engine: str = "in_process",
+        batch_size: int = 64,
+        normalize: bool = True,
+    ) -> pl.Expr:
+        """
+        Generate embeddings for the expression using a local (offline) model.
+
+        See ``polar_llama.embedding_local`` for the full parameter/return docs.
+
+        Parameters
+        ----------
+        model : str, optional
+            An mlx-embeddings-compatible model repo id.
+        engine : str, optional
+            ``"in_process"`` (default) uses the real ``mlx_embeddings``
+            model; ``"fake"`` forces the dependency-free deterministic
+            engine.
+        batch_size : int, optional
+            Number of texts handed to the model per call.
+        normalize : bool, optional
+            L2-normalize each output vector (default ``True``).
+
+        Returns
+        -------
+        polars.Expr
+            Expression with embeddings as ``List[Float64]``.
+        """
+        return embedding_local(
+            self._expr,
+            model=model,
+            engine=engine,
+            batch_size=batch_size,
+            normalize=normalize,
+        )
 
     def cosine_similarity(self, other: IntoExpr) -> pl.Expr:
         """

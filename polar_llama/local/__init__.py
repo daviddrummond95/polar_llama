@@ -32,6 +32,12 @@ __all__ = [
     "batch_generate_quantized",
     "make_quantized_prompt_cache",
     "make_local_inference_fn",
+    "embedding_local",
+    "LocalEmbeddingEngine",
+    "FakeEmbeddingEngine",
+    "MlxEmbeddingEngine",
+    "register_embedding_engine",
+    "get_embedding_engine",
 ]
 
 # Names lazily re-exported from sibling modules, keyed by the module that
@@ -48,6 +54,12 @@ _LAZY_ATTRS = {
     "batch_generate_quantized": "batch_quantized_kv",
     "make_quantized_prompt_cache": "batch_quantized_kv",
     "make_local_inference_fn": "optimize_bridge",
+    "embedding_local": "embed",
+    "LocalEmbeddingEngine": "embed",
+    "FakeEmbeddingEngine": "embed",
+    "MlxEmbeddingEngine": "embed",
+    "register_embedding_engine": "embed",
+    "get_embedding_engine": "embed",
 }
 
 
