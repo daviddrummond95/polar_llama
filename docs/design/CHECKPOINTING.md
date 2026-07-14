@@ -88,3 +88,13 @@ bare `None`. A successful *plain-text* row is the model's raw output and is
 - **Invalidate on prompt/model/param change**: the key embeds the fingerprint.
 - **Works with structured outputs and tool-use**: the struct-decode path is
   unchanged; stored raw strings round-trip identically.
+
+## Related: duplicate collapsing / response cache (issue #77)
+
+`dedupe=True` and `response_cache=...` (`polar_llama/dedup.py`) reuse this
+module's hit/pending/fan-out bookkeeping (extracted to
+`polar_llama.keys.plan_collapse`/`fan_out`, which `checkpoint.checkpointed_expr`
+now calls too) and `CheckpointStore` itself (via the `ResponseCacheStore`
+subclass) for a persistent, cross-job response cache. See
+`docs/design/RESPONSE_CACHE.md` for the full design and the interop rules
+between `checkpoint=`, `usage=`, `dedupe=`, and `response_cache=`.

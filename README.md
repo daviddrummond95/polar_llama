@@ -266,6 +266,33 @@ totals = out.select(
 
 `cost_usd` is computed from a packaged, overridable price table (`polar_llama/pricing.py`); pass `price_table=` (a dict or path) or call `register_model_price(...)` to add/override models. Unknown models yield `cost_usd = null` with a one-time warning. Usage is captured for OpenAI, Groq, Anthropic, Gemini, and Bedrock; the MLX local engine reports tokens + latency with `cost_usd = 0.0`. `usage=False` (the default) is unchanged.
 
+#### Duplicate Collapsing & a Persistent Response Cache
+
+Two related, separately-gated features. `dedupe=True` collapses exact-duplicate rows **within one run** — each unique input is sent once and the result is fanned back out to every row that asked for it, zero extra I/O:
+
+```python
+out = df.with_columns(answer=inference_async(pl.col("prompt"), model="gpt-4o-mini", dedupe=True))
+```
+
+`response_cache="path"` adds a persistent, **cross-job** store (implies `dedupe=True` automatically): identical requests from a different run, even a different process, reuse a prior result instead of re-calling the backend.
+
+```python
+from polar_llama import ResponseCache, DedupeStats
+
+stats = DedupeStats()
+out = df.with_columns(
+    answer=inference_async(
+        pl.col("prompt"),
+        model="gpt-4o-mini",
+        response_cache=ResponseCache("responses.cache", ttl="24h"),
+        dedupe_stats=stats,
+    )
+)
+print(stats.hit_rate, stats.rows_collapsed, stats.calls_made)
+```
+
+Only successful results are ever persisted — a failed row always recomputes on the next run. `ttl=` expires entries lazily on read; call `ResponseCache(...).prune()` to compact the store and reclaim expired entries, or `.clear()` to invalidate everything. Not currently supported together with `checkpoint=` or `usage=True` (raises `ValueError` — see `docs/design/RESPONSE_CACHE.md` for the full interop rules and why).
+
 #### Local Inference (Apple Silicon / MLX)
 
 Run inference **on-device** on Apple Silicon instead of a provider API — no keys, no network — via [mlx-lm](https://github.com/ml-explore/mlx-lm). Install the extra (Apple Silicon, Python ≥ 3.10):

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-07-14
+
+### Added
+- **In-run duplicate collapsing and a persistent, cross-job response cache** (`inference_async(..., dedupe=True)` / `response_cache=...`, and `inference_messages`, issue #77): `dedupe=True` sends each unique row in a batch to the backend once and fans the result back out to every row that shared it, at zero extra I/O. `response_cache="path"` (or a `ResponseCache(path, ttl=..., on_mismatch=...)`) adds a persistent store on top -- reusing `polar_llama/checkpoint.py`'s Parquet-part store, atomic writes, and fingerprint-based invalidation verbatim -- so identical requests from a *different* run or process reuse a prior result. `response_cache=` implies `dedupe=True` automatically. Only successful results are ever persisted; a failed row always recomputes. Pass `dedupe_stats=DedupeStats()` to get `rows_total`/`rows_null`/`cache_hits`/`rows_collapsed`/`calls_made`/`hit_rate` back after a collect. `ResponseCache(...).prune()`/`.clear()` compact/invalidate the store manually. Both kwargs default to off/`None` -- byte-identical to the pre-#77 code path. See `docs/design/RESPONSE_CACHE.md`.
+- Extracted the hit/pending/fan-out grouping bookkeeping shared by checkpointing and dedupe into `polar_llama.keys.plan_collapse`/`fan_out`; `checkpoint.checkpointed_expr` now calls these instead of duplicating the logic (verified behavior-identical -- `tests/test_checkpointing.py` passes unmodified against the refactor).
+
+### Notes
+- Not currently supported together (raise `ValueError`): `response_cache=` + `checkpoint=` (two persistent stores for one expression); `response_cache=` + `usage=True` (the usage envelope's failed-row shape isn't recognized by the store's ok/fail classification -- same reason as `checkpoint=` + `usage=True`). `dedupe=True` alongside `checkpoint=` is allowed and silently subsumed (checkpoint already collapses duplicates per batch). `dedupe=True` + `usage=True` (no store) is allowed; duplicate rows carry the same `usage` struct as the row actually computed, so `SUM(cost_usd)` over-counts by the collapse factor -- `dedupe_stats.calls_made` is the true-spend signal.
+
 ## [0.6.2] - 2026-07-14
 
 ### Added
