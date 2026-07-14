@@ -148,6 +148,48 @@ def config_fingerprint(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def request_fingerprint(
+    symbol: str, kwargs: Dict[str, Any], system_prompt: Optional[str] = None
+) -> Tuple[str, Dict[str, Any]]:
+    """Compute the request-shaping fingerprint + a debuggable inputs dict.
+
+    Shared by the checkpoint path (issue #75), the dedupe/response_cache path
+    (issue #77), and the run-manifest path (issue #85) so "the same request"
+    means exactly the same thing everywhere -- extracted from what used to be
+    duplicated inline in `inference_async` and `inference_messages`
+    (`config_fingerprint` + `endpoint_fingerprint_input`, both in this module).
+    The returned `fingerprint_inputs` dict is purely for `_meta.json`
+    debuggability (not used for invalidation -- `fingerprint` alone is
+    authoritative), so unifying its shape across call sites changes no
+    observable behavior.
+
+    `kwargs` must contain (at least) ``provider``, ``model``,
+    ``response_schema``, and ``response_model_name`` -- the same dict shape
+    `inference_async`/`inference_messages`/`build_manifest` build before
+    calling this.
+    """
+    endpoint = endpoint_fingerprint_input(kwargs["provider"])
+    fingerprint = config_fingerprint(
+        symbol=symbol,
+        provider=kwargs["provider"],
+        model=kwargs["model"],
+        response_schema=kwargs["response_schema"],
+        response_model_name=kwargs["response_model_name"],
+        system_prompt=system_prompt,
+        extra={"endpoint": endpoint},
+    )
+    fingerprint_inputs = {
+        "symbol": symbol,
+        "provider": kwargs["provider"],
+        "model": kwargs["model"],
+        "response_model_name": kwargs["response_model_name"],
+        "has_response_schema": kwargs["response_schema"] is not None,
+        "has_system_prompt": system_prompt is not None,
+        "endpoint": endpoint,
+    }
+    return fingerprint, fingerprint_inputs
+
+
 def content_key(row_input: str, fingerprint: str) -> str:
     """Compute the per-row content key: ``sha256(fingerprint \\0 row_input)``.
 
