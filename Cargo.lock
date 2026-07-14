@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "polar-llama"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "aws-config",

@@ -7,6 +7,7 @@ pub mod cost;
 pub mod kmeans;
 pub mod mcp;
 pub mod metrics;
+pub mod quality;
 mod stream_pyfn;
 
 #[cfg(target_os = "linux")]

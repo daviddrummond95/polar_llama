@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-14
+
+### Added
+- **Survey data-quality flags** (`quality_report`, `QualityConfig`, issue #80): a DataFrame-shaped pipeline that scores every respondent for common survey data-quality problems and returns a per-flag summary, without ever dropping a row. Every score is a graded `Float64` in `[0, 1]` (higher = more suspicious); booleans are derived by thresholding, and a null score (not enough signal) always resolves to `flag = False`. Heuristic tier (zero API calls): `straightlining_score`, `gibberish_score`, and `duplicate_answer_score` are new Rust plugin expressions (`src/quality.rs` pure functions, unit-tested there, mirroring the `src/metrics.rs`/issue #79 split); `response_length_score` (robust z-score of answer length) and `speeder_score` (percentile- or median-fraction-based) are pure Polars. All five are available standalone and via the `.llama` namespace (`pl.col("g1").llama.straightlining_score([...])`, etc.). Embedding/LLM tier (opt-in, `QualityConfig(llm_tier=True)`, default off): cross-respondent `near_duplicate` detection (`embedding_async` + `knn_hnsw` + `cosine_similarity`) and a `likely_ai` stylistic-heuristic flag (`inference_messages(..., response_model=...)`, also exposed standalone as `ai_likelihood`) -- both carry a mandatory "flag, not verdict" framing; `likely_ai` additionally documents the false-positive risk of AI-text detectors, including their documented bias against non-native English speakers, and states it must never be sole grounds for exclusion or panelist sanction. `quality_report(df, config)` returns `QualityReport(df, summary)`: `.df` is `df` plus a `quality` struct column (schema reflects which inputs were configured -- unconfigured sub-structs are omitted, not null-filled); `.summary` is one row per active flag plus a final `any_flag` row. All default thresholds are documented, subjective conventions -- see `docs/QUALITY_FLAGS.md`.
+
 ## [0.7.1] - 2026-07-14
 
 ### Added

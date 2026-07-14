@@ -624,6 +624,35 @@ coded = result.df.with_columns(
 
 See `docs/CODEBOOK_INDUCTION.md` for the full walkthrough.
 
+#### Survey Data-Quality Flags
+
+Score every respondent in a survey DataFrame for common data-quality problems — straightlining, gibberish open-ends, duplicate answers, response-length outliers, speeding — and get a per-flag summary back, without ever dropping a row. Every score is graded (`Float64` in `[0, 1]`, higher = more suspicious); a null score (not enough signal) always resolves to `flag = False`. The heuristic tier is zero-API; an opt-in embedding/LLM tier adds cross-respondent near-duplicate detection and a stylistic likely-AI-generated-text flag.
+
+```python
+from polar_llama import QualityConfig, quality_report
+
+config = QualityConfig(
+    id_column="respondent_id",
+    grid_columns=["g1", "g2", "g3", "g4", "g5"],   # Likert grid
+    text_columns=["oe1", "oe2"],                    # open-ends
+    duration_column="duration_s",                   # seconds
+)
+result = quality_report(survey_df, config)
+
+result.df.height == survey_df.height   # True — quality_report never drops a row
+result.df.select("respondent_id", "quality").unnest("quality")
+result.summary   # one row per flag: flag, n_scored, n_flagged, rate, threshold, mean_score
+```
+
+**Key Features:**
+- **Never drops a row**: every flag is a threshold on a graded `[0, 1]` score; missing data scores null, which always resolves to `flag = False` — never dropped, never force-flagged.
+- **Zero-API heuristic tier**: `straightlining_score`, `gibberish_score`, and `duplicate_answer_score` are Rust plugin expressions (`src/quality.rs`); `response_length_score` (robust z-score of length) and `speeder_score` (percentile- or median-fraction-based) are pure Polars. All five also work standalone and via `.llama` (`pl.col("g1").llama.straightlining_score([...])`).
+- **Opt-in embedding/LLM tier**: `QualityConfig(llm_tier=True)` adds `near_duplicate` (cross-respondent, via `embedding_async` + `knn_hnsw` + `cosine_similarity`) and `likely_ai` (via `inference_messages(..., response_model=...)`, also exposed standalone as `ai_likelihood`) — off by default, zero network calls unless requested.
+- **Flag, not verdict**: `likely_ai` carries a mandatory limitation warning — AI-text detectors are unreliable and biased against non-native English speakers; treat it as a review-prioritization signal only, never as sole grounds for exclusion or panelist sanction.
+- **Documented, tunable thresholds**: every default threshold is a subjective convention, not a validated cutoff — see `docs/QUALITY_FLAGS.md` section 7.
+
+See `docs/QUALITY_FLAGS.md` for the full formulas, every default threshold, and the AI-detection limitation discussion.
+
 #### Tool Use and MCP
 
 Polar Llama supports tool calling without hiding an agent loop inside your rows. The loop is unrolled into the dataframe: the LLM *emits* tool calls as structured output, `execute_tool_calls` runs every call of every row concurrently (against an MCP server or any Python callable), and a second inference pass synthesizes the results — every intermediate step is an ordinary column.
