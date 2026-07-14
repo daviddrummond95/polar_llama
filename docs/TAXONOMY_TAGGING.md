@@ -116,11 +116,11 @@ Each tagged document returns a Struct with the following nested structure:
 ```python
 {
     "field_name": {
-        "thinking": {
-            "value1": "Reasoning about why value1 might apply...",
-            "value2": "Reasoning about why value2 might apply...",
-            # ... reasoning for each possible value
-        },
+        "thinking": [
+            {"value": "value1", "reasoning": "Why value1 might apply..."},
+            {"value": "value2", "reasoning": "Why value2 might apply..."},
+            # ... one entry per possible value
+        ],
         "reflection": "Overall reflection on the analysis of this field...",
         "value": "selected_value",  # The chosen value
         "confidence": 0.87  # Confidence score (0.0 to 1.0)
@@ -131,10 +131,12 @@ Each tagged document returns a Struct with the following nested structure:
 
 ### Field Descriptions
 
-- **thinking**: A dictionary with reasoning for each possible value in the taxonomy
+- **thinking**: A list with one `{value, reasoning}` entry per possible value in the taxonomy. Each entry's `value` is the candidate value name being considered, and `reasoning` explains why it does or does not apply; this is distinct from the field's own `value` below, which holds the final selection.
 - **reflection**: The model's overall reflection after considering all options
 - **value**: The selected value (one of the values from the taxonomy)
 - **confidence**: How confident the model is in its selection (0.0 = not confident, 1.0 = very confident)
+
+> **Note:** `thinking` is represented as a list of fixed-shape objects (not a dictionary keyed by value name) so that the generated JSON schema is compatible with OpenAI Structured Outputs strict mode, which requires every object node to declare a fixed set of properties. This also means taxonomy value names never need to be valid identifiers or unique dictionary keys.
 
 ## Accessing Results
 
@@ -156,10 +158,17 @@ sentiment_analysis = result_df.select([
 ### Access Detailed Reasoning
 
 ```python
-# Get the thinking for a specific field
+# Get the thinking list for a specific field (a list of {value, reasoning} structs)
 thinking = result_df.select(
     pl.col("tags").struct.field("sentiment").struct.field("thinking")
 )
+
+# Explode into one row per candidate value with its reasoning
+reasoning_per_value = result_df.select(
+    "id",
+    pl.col("tags").struct.field("sentiment").struct.field("thinking").alias("thinking")
+).explode("thinking").unnest("thinking")
+# columns: id, value, reasoning
 
 # Get the reflection
 reflection = result_df.select(

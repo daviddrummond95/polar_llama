@@ -91,13 +91,16 @@ def example_basic_taxonomy():
     # Show detailed reasoning for the first ticket
     print("\n🔍 Detailed Analysis for Ticket 1:")
     print(f"Message: {df['message'][0]}")
-    print(f"\nSentiment thinking:")
-    print(result_df['tags'].struct.field('sentiment').struct.field('thinking')[0])
-    print(f"\nSentiment reflection:")
+    print("\nSentiment thinking:")
+    # `thinking` is a list of {value, reasoning} entries, one per candidate value
+    for item in result_df['tags'].struct.field('sentiment').struct.field('thinking')[0]:
+        print(f"  - {item['value']}: {item['reasoning']}")
+    print("\nSentiment reflection:")
     print(result_df['tags'].struct.field('sentiment').struct.field('reflection')[0])
-    print(f"\nUrgency thinking:")
-    print(result_df['tags'].struct.field('urgency').struct.field('thinking')[0])
-    print(f"\nUrgency reflection:")
+    print("\nUrgency thinking:")
+    for item in result_df['tags'].struct.field('urgency').struct.field('thinking')[0]:
+        print(f"  - {item['value']}: {item['reasoning']}")
+    print("\nUrgency reflection:")
     print(result_df['tags'].struct.field('urgency').struct.field('reflection')[0])
 
 
