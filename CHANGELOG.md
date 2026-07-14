@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-14
+
+### Added
+- **Codebook induction** (`cluster_embeddings`, `induce_codebook`, `apply_codebook`, `codebook_to_taxonomy`, issue #78): a DataFrame-shaped pipeline for building and applying a qualitative-coding codebook from a text column, with no external clustering dependency. `cluster_embeddings(embeddings_col, k=..., k_min=..., k_max=..., seed=...)` is a whole-column Rust plugin expression (same pattern as `knn_hnsw`) backed by a hand-rolled k-means++ / Lloyd's algorithm (`src/kmeans.rs`): a splitmix64 PRNG, cosine-distance spherical k-means, and a sampled-silhouette heuristic for automatic `k` selection when `k` is omitted -- zero new dependencies (no `linfa`/`ndarray`/`rand`/scikit-learn/numpy). `induce_codebook(df, column, ...)` embeds (via `embedding_async`, unless `embedding_column=` is given), clusters, picks per-cluster exemplars with ordinary `sort` + `group_by().agg(...head(n))`, and asks the LLM to name and define each cluster (`inference_messages` + a strict-schema response model), merging codes that independently collide across clusters. It returns the input DataFrame plus `cluster_id`/`cluster_distance` columns (same row count and order -- no reshaping) and a `Codebook`. `apply_codebook(text_col, codebook)` multi-label-codes a text column against a codebook in one `inference_messages` call per document, using a response model shaped as a fixed-length `List[{code, applies, confidence, evidence}]` (never a `Dict`/dynamic-key object -- the issue #51 strict-mode lesson), and composes directly back onto the same DataFrame `induce_codebook` returned via a plain `with_columns` (no join/explode). `codebook_to_taxonomy(codebook)` bridges an induced codebook into the `tag_taxonomy`/`_create_taxonomy_pydantic_model` taxonomy shape for callers who want single-label (mutually exclusive) classification instead of `apply_codebook`'s multi-label evaluation. See `docs/CODEBOOK_INDUCTION.md`.
+
 ## [0.6.3] - 2026-07-14
 
 ### Added
