@@ -2016,6 +2016,16 @@ from polar_llama.tools import (
 
 
 # ============================================================================
+# Persistent HNSW Index (issue #82) — see docs/VECTOR_SIMILARITY_AND_ANN.md
+# ============================================================================
+
+from polar_llama.index import (
+    NEIGHBOR_STRUCT_DTYPE,
+    HnswIndex,
+)
+
+
+# ============================================================================
 # Polars Namespace Accessor
 # ============================================================================
 

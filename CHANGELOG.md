@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-14
+
+### Added
+- **Persistent, incrementally updatable HNSW index** (`HnswIndex`, issue #82): a DataFrame-native, stateful, serializable ANN index (precedent: `Checkpoint` #75, `Codebook` #78) built on top of `instant-distance`'s `HnswMap` -- which is immutable once built, so this is a small LSM-like layer around it, not a new HNSW implementation. `HnswIndex.build(df, id_col, embedding_col)` builds a fresh index; `.add(df, id_col, embedding_col)` upserts into a brute-force staging buffer, queryable immediately without touching the immutable main graph; `.remove(ids)` soft-deletes via a tombstone set. `.query(query_df, embedding_col, k)` returns `DataFrame(query_id|neighbor_id|distance|rank)` (`query_id` is the query row's 0-based index); `.query_one(vector, k)` is the single-vector convenience form; `.knn(expr, k) -> pl.Expr` bridges the same batch core into a `map_batches` expression (`List[Struct{neighbor_id, distance, rank}]` per row). Queries over-fetch from the main graph (`k' = min(k + tombstone_count, ef_search)`) to compensate for tombstoned hits, merge with the staging buffer, and filter dead ids. **Compaction** (automatic via `auto_compact=True`, default on, once the staging buffer or tombstone count crosses `max(threshold_min, threshold_ratio * len(index))`; or manual via `.compact()`) rebuilds the main graph from every currently-live point and clears staging/tombstones. External ids are arbitrary caller strings, mapped to a stable internal-id space that survives compaction. `.save(path)`/`HnswIndex.load(path)` round-trip the whole index -- main graph, pending staging/tombstones, id maps, dimension, and the pinned build seed (for deterministic compaction) -- through a small `bincode`-encoded file with a magic+version header; `bincode` is the only new Rust dependency this feature adds (pure-Rust, serde-only -- `instant-distance`'s already-enabled `with-serde` feature supplies `Serialize`/`Deserialize` for the graph itself). Implemented as a new `#[pyclass]` (`src/index.rs::PyHnswIndex`, Python name `_HnswIndexCore`) taking/returning `pyo3-polars` `PySeries`/`PyDataFrame` directly (zero-copy Arrow, no JSON shuttle) with batch queries releasing the GIL; `src/ann.rs` and the stateless `knn_hnsw` expression are untouched -- `HnswIndex` reuses `ann::EmbeddingPoint`'s cosine-distance metric verbatim. See `docs/VECTOR_SIMILARITY_AND_ANN.md`.
+
+### Notes
+- Query latency at 100k points is single-digit milliseconds after compaction; loading a 100k-point index from disk is a low-single-digit-second `bincode` deserialization (see `scripts/bench_hnsw_index.py`). `instant-distance` has no mmap/lazy-load path, so `.load()` always deserializes the full graph into memory up front -- there is no partial/streaming load.
+
 ## [0.7.3] - 2026-07-14
 
 ### Added

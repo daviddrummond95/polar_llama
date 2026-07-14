@@ -623,6 +623,24 @@ query = query.with_columns(
 
 See `docs/VECTOR_SIMILARITY_AND_ANN.md` for complete documentation and advanced examples.
 
+#### Persistent HNSW Index
+
+`knn_hnsw` above rebuilds its graph on every call — fine for a one-off query, wasteful if you query the same corpus repeatedly or want to grow it over time. `HnswIndex` (issue #82) is a persistent, incrementally updatable index: build it once, `.add()`/`.remove()` points into it (queryable immediately, via a brute-force staging buffer + soft-delete tombstones on top of `instant-distance`'s otherwise-immutable HNSW graph, auto-compacted periodically), and `.save()`/`.load()` it to/from disk.
+
+```python
+from polar_llama import HnswIndex
+
+index = HnswIndex.build(corpus, id_col="doc_id", embedding_col="embedding")
+index.add(new_docs, id_col="doc_id", embedding_col="embedding")  # incremental, queryable immediately
+index.remove(["doc-2"])                                          # soft-delete
+
+results = index.query(queries, embedding_col="embedding", k=5)   # query_id | neighbor_id | distance | rank
+index.save("my_index.bin")
+index = HnswIndex.load("my_index.bin")
+```
+
+See `docs/VECTOR_SIMILARITY_AND_ANN.md#persistent-hnsw-index-hnswindex` for the full API (`.query_one`, `.knn()` expression bridge, compaction policy, performance characteristics).
+
 #### Codebook Induction
 
 Build a qualitative-coding codebook from a text column — embed, cluster, and let the LLM name and define each cluster — then apply it back as multi-label tags. No external clustering dependency: `cluster_embeddings` is a hand-rolled k-means (k-means++ / Lloyd's, in Rust) with automatic `k` selection via sampled silhouette.
