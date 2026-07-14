@@ -8,6 +8,12 @@ import polars as pl
 
 from polar_llama.utils import parse_into_expr, register_plugin, parse_version
 from polar_llama.types import CacheStrategy, CacheConfig, CacheMetrics
+from polar_llama.checkpoint import Checkpoint, checkpointed_expr
+from polar_llama.keys import (
+    config_fingerprint,
+    canonicalize_messages_input,
+    endpoint_fingerprint_input,
+)
 
 if TYPE_CHECKING:
     from polars.type_aliases import IntoExpr
@@ -464,6 +470,35 @@ def _create_taxonomy_prompt(
     return "\n".join(prompt_parts)
 
 
+def _make_run_pending(
+    symbol: str, kwargs: Dict[str, Any]
+) -> Callable[[pl.Series], pl.Series]:
+    """Build the `run_pending` callback `checkpointed_expr` calls per chunk.
+
+    Runs the *unchanged* Rust plugin expression eagerly over a small,
+    freshly-built one-column DataFrame holding just the pending rows for
+    this chunk -- the nested `DataFrame(...).select(register_plugin(...))`
+    described in the checkpointing design (`polar_llama/checkpoint.py`).
+    """
+
+    def run_pending(s: pl.Series) -> pl.Series:
+        if len(s) == 0:
+            return pl.Series([], dtype=pl.Utf8)
+        inner_df = pl.DataFrame({"__ckpt_in": s})
+        out = inner_df.select(
+            register_plugin(
+                args=[pl.col("__ckpt_in")],
+                symbol=symbol,
+                is_elementwise=True,
+                lib=lib,
+                kwargs=kwargs,
+            ).alias("__ckpt_out")
+        )
+        return out["__ckpt_out"]
+
+    return run_pending
+
+
 def inference_async(
     expr: IntoExpr,
     *,
@@ -473,6 +508,7 @@ def inference_async(
     response_format: Optional[Type["BaseModel"]] = None,
     cache: Union[bool, CacheConfig] = False,
     system_prompt: Optional[str] = None,
+    checkpoint: Optional[Union[str, Path, Checkpoint]] = None,
 ) -> pl.Expr:
     """
     Asynchronously infer completions for the given text expressions using an LLM.
@@ -516,6 +552,32 @@ def inference_async(
             >>> config = CacheConfig(strategy=CacheStrategy.SYSTEM_PROMPT, ttl="1h")
             >>> df.with_columns(
             ...     response=inference_async(pl.col("messages"), cache=config)
+            ... )
+    checkpoint : str, Path, or Checkpoint, optional
+        Enable resumable batch checkpointing (issue #75). A str/Path is
+        shorthand for ``Checkpoint(path)``; pass a `Checkpoint` for
+        fine-grained control (``flush_every``, ``retry_failed``,
+        ``on_mismatch``). When set, results are persisted to the given
+        sidecar directory as they complete, and re-running the same
+        expression against the same directory skips rows already computed
+        -- so killing a batch partway through and re-running only pays for
+        the rows not yet done. A row is considered "the same request" if
+        its content (plus every other request-shaping parameter: provider,
+        model, system_prompt, response schema) is unchanged; changing any of
+        those forces a full recompute. Failed rows are stored too (so a
+        crash doesn't lose them) and are retried on resume by default
+        (``retry_failed=True``); set ``retry_failed=False`` to keep stored
+        errors as-is. Default: None (checkpointing disabled -- identical to
+        the pre-#75 code path).
+
+        Example:
+            >>> # First run: computes all rows, persisting as it goes.
+            >>> # If killed partway through and re-run against the same
+            >>> # directory, only the not-yet-completed rows are recomputed.
+            >>> df.with_columns(
+            ...     response=inference_async(
+            ...         pl.col("prompt"), checkpoint="runs/batch1.ckpt"
+            ...     )
             ... )
 
     Returns
@@ -566,13 +628,44 @@ def inference_async(
     if system_prompt is not None:
         kwargs["system_prompt"] = system_prompt
 
-    result_expr = register_plugin(
-        args=[expr],
-        symbol="inference_async",
-        is_elementwise=True,
-        lib=lib,
-        kwargs=kwargs,
-    )
+    if checkpoint is not None:
+        if not isinstance(checkpoint, Checkpoint):
+            checkpoint = Checkpoint(checkpoint)
+        endpoint = endpoint_fingerprint_input(kwargs["provider"])
+        fingerprint = config_fingerprint(
+            symbol="inference_async",
+            provider=kwargs["provider"],
+            model=kwargs["model"],
+            response_schema=kwargs["response_schema"],
+            response_model_name=kwargs["response_model_name"],
+            system_prompt=system_prompt,
+            extra={"endpoint": endpoint},
+        )
+        fingerprint_inputs = {
+            "symbol": "inference_async",
+            "provider": kwargs["provider"],
+            "model": kwargs["model"],
+            "response_model_name": kwargs["response_model_name"],
+            "has_response_schema": kwargs["response_schema"] is not None,
+            "has_system_prompt": system_prompt is not None,
+            "endpoint": endpoint,
+        }
+        result_expr = checkpointed_expr(
+            expr,
+            run_pending=_make_run_pending("inference_async", kwargs),
+            fingerprint=fingerprint,
+            checkpoint=checkpoint,
+            fingerprint_inputs=fingerprint_inputs,
+            has_schema=kwargs["response_schema"] is not None,
+        )
+    else:
+        result_expr = register_plugin(
+            args=[expr],
+            symbol="inference_async",
+            is_elementwise=True,
+            lib=lib,
+            kwargs=kwargs,
+        )
 
     # If response_model was provided, convert JSON strings to structs
     if struct_dtype is not None:
@@ -683,6 +776,7 @@ def inference_messages(
     response_model: Optional[Type["BaseModel"]] = None,
     response_format: Optional[Type["BaseModel"]] = None,
     cache: Union[bool, CacheConfig] = False,
+    checkpoint: Optional[Union[str, Path, Checkpoint]] = None,
 ) -> pl.Expr:
     """
     Process message arrays (conversations) for inference using LLMs.
@@ -724,6 +818,13 @@ def inference_messages(
             ...         cache=True
             ...     )
             ... )
+    checkpoint : str, Path, or Checkpoint, optional
+        Enable resumable batch checkpointing (issue #75). See
+        ``inference_async`` for the full description; behaves identically
+        here. Both JSON-string and ``List(Struct{role, content})`` input
+        rows are canonicalized to the same content key when their decoded
+        conversation content is identical, so the two input shapes share
+        checkpoint entries.
 
     Returns
     -------
@@ -735,7 +836,8 @@ def inference_messages(
 
     # Both JSON-string input and List(Struct{role, content}) input are handled
     # natively by the Rust `inference_messages` expression, so no Python UDF
-    # (map_batches) is needed here — the default path stays lazy/streaming.
+    # (map_batches) is needed here — the default path stays lazy/streaming
+    # (unless checkpointing is requested, which always needs a UDF).
 
     # Convert Provider to string to make it picklable. All keys are always
     # present (None values deserialize to Option::None) because polars
@@ -773,13 +875,43 @@ def inference_messages(
     else:
         kwargs["cache"] = False
 
-    result_expr = register_plugin(
-        args=[expr],
-        symbol="inference_messages",
-        is_elementwise=True,
-        lib=lib,
-        kwargs=kwargs,
-    )
+    if checkpoint is not None:
+        if not isinstance(checkpoint, Checkpoint):
+            checkpoint = Checkpoint(checkpoint)
+        endpoint = endpoint_fingerprint_input(kwargs["provider"])
+        fingerprint = config_fingerprint(
+            symbol="inference_messages",
+            provider=kwargs["provider"],
+            model=kwargs["model"],
+            response_schema=kwargs["response_schema"],
+            response_model_name=kwargs["response_model_name"],
+            extra={"endpoint": endpoint},
+        )
+        fingerprint_inputs = {
+            "symbol": "inference_messages",
+            "provider": kwargs["provider"],
+            "model": kwargs["model"],
+            "response_model_name": kwargs["response_model_name"],
+            "has_response_schema": kwargs["response_schema"] is not None,
+            "endpoint": endpoint,
+        }
+        result_expr = checkpointed_expr(
+            expr,
+            run_pending=_make_run_pending("inference_messages", kwargs),
+            fingerprint=fingerprint,
+            checkpoint=checkpoint,
+            canonicalize=canonicalize_messages_input,
+            fingerprint_inputs=fingerprint_inputs,
+            has_schema=kwargs["response_schema"] is not None,
+        )
+    else:
+        result_expr = register_plugin(
+            args=[expr],
+            symbol="inference_messages",
+            is_elementwise=True,
+            lib=lib,
+            kwargs=kwargs,
+        )
 
     # If response_model was provided, convert JSON strings to structs
     if struct_dtype is not None:
@@ -1491,6 +1623,7 @@ class LlamaNamespace:
         response_format: Optional[Type["BaseModel"]] = None,
         cache: Union[bool, CacheConfig] = False,
         system_prompt: Optional[str] = None,
+        checkpoint: Optional[Union[str, Path, Checkpoint]] = None,
     ) -> pl.Expr:
         """
         Asynchronously infer completions for the expression using an LLM.
@@ -1510,6 +1643,9 @@ class LlamaNamespace:
         system_prompt : str, optional
             Shared system prompt cached across all rows when cache=True
             (see the functional ``inference_async`` for details).
+        checkpoint : str, Path, or Checkpoint, optional
+            Enable resumable batch checkpointing (see the functional
+            ``inference_async`` for details).
 
         Returns
         -------
@@ -1523,6 +1659,7 @@ class LlamaNamespace:
             response_model=response_model or response_format,
             cache=cache,
             system_prompt=system_prompt,
+            checkpoint=checkpoint,
         )
 
     def inference_stream(
