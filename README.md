@@ -399,6 +399,38 @@ module = Predict(Signature("note -> category", instructions="Classify the note."
 compiled = InstructionOptimizer(metric=exact_match).compile(module, trainset)
 ```
 
+#### Human-in-the-loop Review Loop
+
+Turn a sample of an LLM's output into a spreadsheet for a human reviewer, then feed their corrections back into the optimizer: code → export a sample for review → a human corrects it → import the corrections (with agreement stats) → retune. See [`docs/HITL_WORKFLOW.md`](docs/HITL_WORKFLOW.md) for the full loop.
+
+```python
+from polar_llama import export_review_sample, import_corrections, retune_from_corrections
+
+# 1. Export a stratified sample for review, oversampling low-confidence rows
+sample = export_review_sample(
+    coded_df,               # has a "code" column and, optionally, a "confidence" column
+    n=100,
+    strata="code",
+    confidence_column="confidence",
+    oversample_low_confidence=4.0,
+    path="review_batch.csv",   # a human opens this, fills in corrected_code
+)
+
+# 2. Join the (reviewed) corrections back on and score human/LLM agreement
+result = import_corrections(coded_df, reviewed_df, code_column="code")
+print(result.kappa, result.agreement_rate, result.n_reviewed, result.n_changed)
+
+# 3. Mine few-shot demos from the corrections and compile an improved module
+tuned = retune_from_corrections(
+    result.df.filter(pl.col("was_reviewed")),
+    Signature("text -> code"),
+    provider="openai",
+    model="gpt-4o-mini",
+)
+```
+
+`export_review_sample` writes CSV out of the box; XLSX export needs the optional `[excel]` extra (`pip install "polar-llama[excel]"`), never a required dependency. `import_corrections` reuses `cohens_kappa` (see [`docs/RELIABILITY_METRICS.md`](docs/RELIABILITY_METRICS.md)); `retune_from_corrections` reuses `BootstrapFewShot` above — no logic is duplicated between the two features.
+
 #### Vector Embeddings
 
 Polar Llama provides parallelized, memory-efficient embedding generation for converting text into vector representations. This is useful for semantic search, clustering, and similarity analysis:
