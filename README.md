@@ -293,6 +293,33 @@ print(stats.hit_rate, stats.rows_collapsed, stats.calls_made)
 
 Only successful results are ever persisted — a failed row always recomputes on the next run. `ttl=` expires entries lazily on read; call `ResponseCache(...).prune()` to compact the store and reclaim expired entries, or `.clear()` to invalidate everything. Not currently supported together with `checkpoint=` or `usage=True` (raises `ValueError` — see `docs/design/RESPONSE_CACHE.md` for the full interop rules and why).
 
+#### Run Manifests (Reproducibility & Audit)
+
+`build_manifest(...)` produces a small, JSON-serializable audit record of *what a run asked for* — provider, model, prompt/schema content (as sha256 hashes, never plaintext, unless you opt in), sampling params — with a `manifest_id` computed deterministically so two runs with identical configuration get the same id even if their timestamps or token counts differ:
+
+```python
+from polar_llama import build_manifest, with_manifest_id
+
+out = df.with_columns(response=inference_async(pl.col("prompt"), model="gpt-4o-mini", system_prompt=SYS))
+
+manifest = build_manifest(
+    out, symbol="inference_async", provider="openai", model="gpt-4o-mini", system_prompt=SYS,
+)
+manifest.save("runs/2026-07-14.manifest.json")   # atomic JSON sidecar
+out = with_manifest_id(out, manifest)            # attach a manifest_id column to the results
+```
+
+Later, verify a manifest and re-run it against fresh row data:
+
+```python
+from polar_llama import load_manifest, replay
+
+manifest = load_manifest("runs/2026-07-14.manifest.json")  # raises ManifestIntegrityError if tampered
+out = replay(manifest, new_df, "prompt", system_prompt=SYS)  # raises ManifestMismatchError if SYS drifted
+```
+
+`config_fingerprint` is computed via the same `request_fingerprint` the #75 checkpoint / #77 dedupe paths use — a manifest's fingerprint is guaranteed identical to the runtime one, not a parallel hash. Manifests store *hashes* of prompts/schemas, not their text (safe to share without leaking prompt IP); pass `build_manifest(..., store_texts=True)` to embed plaintext for fully self-contained replay. Caveat: hosted `inference_async`/`inference_messages` don't forward sampling params (`temperature`, `max_tokens`, ...) today, so `params={}` on a manifest means "provider defaults apply" — the manifest guarantees what the client asked for, not what the provider used. See `docs/RUN_MANIFESTS.md`.
+
 #### Local Inference (Apple Silicon / MLX)
 
 Run inference **on-device** on Apple Silicon instead of a provider API — no keys, no network — via [mlx-lm](https://github.com/ml-explore/mlx-lm). Install the extra (Apple Silicon, Python ≥ 3.10):

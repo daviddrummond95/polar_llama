@@ -23,6 +23,7 @@ from polar_llama.keys import (
     config_fingerprint,
     canonicalize_messages_input,
     endpoint_fingerprint_input,
+    request_fingerprint as _request_fingerprint,
 )
 from polar_llama.dedup import (
     DedupeStats,
@@ -631,43 +632,6 @@ def _make_run_pending(
     return run_pending
 
 
-def _request_fingerprint(
-    symbol: str, kwargs: Dict[str, Any], system_prompt: Optional[str] = None
-) -> Tuple[str, Dict[str, Any]]:
-    """Compute the request-shaping fingerprint + a debuggable inputs dict.
-
-    Shared by the checkpoint path (issue #75) and the dedupe/response_cache
-    path (issue #77) so "the same request" means exactly the same thing to
-    both -- extracted from what used to be duplicated inline in
-    `inference_async` and `inference_messages` (`config_fingerprint` +
-    `endpoint_fingerprint_input`, `polar_llama/keys.py`). The returned
-    `fingerprint_inputs` dict is purely for `_meta.json` debuggability (not
-    used for invalidation -- `fingerprint` alone is authoritative), so
-    unifying its shape across both call sites changes no observable
-    behavior.
-    """
-    endpoint = endpoint_fingerprint_input(kwargs["provider"])
-    fingerprint = config_fingerprint(
-        symbol=symbol,
-        provider=kwargs["provider"],
-        model=kwargs["model"],
-        response_schema=kwargs["response_schema"],
-        response_model_name=kwargs["response_model_name"],
-        system_prompt=system_prompt,
-        extra={"endpoint": endpoint},
-    )
-    fingerprint_inputs = {
-        "symbol": symbol,
-        "provider": kwargs["provider"],
-        "model": kwargs["model"],
-        "response_model_name": kwargs["response_model_name"],
-        "has_response_schema": kwargs["response_schema"] is not None,
-        "has_system_prompt": system_prompt is not None,
-        "endpoint": endpoint,
-    }
-    return fingerprint, fingerprint_inputs
-
-
 def inference_async(
     expr: IntoExpr,
     *,
@@ -850,6 +814,11 @@ def inference_async(
             ...     r=inference_async(pl.col("p"), dedupe=True, dedupe_stats=stats)
             ... )
             >>> stats.hit_rate, stats.rows_collapsed, stats.calls_made  # doctest: +SKIP
+
+    See also ``polar_llama.build_manifest`` (issue #85) for a deterministic,
+    shareable audit record of a run's configuration -- reuses this
+    function's own request fingerprint, so it's guaranteed consistent with
+    what was actually sent.
 
     Returns
     -------
@@ -1175,6 +1144,10 @@ def inference_messages(
     dedupe_stats : DedupeStats, optional
         Mutable accumulator for ``dedupe=``/``response_cache=`` aggregates.
         See ``inference_async``.
+
+    See also ``polar_llama.build_manifest`` (issue #85, symbol=
+    ``"inference_messages"``) for a deterministic, shareable audit record
+    of a run's configuration.
 
     Returns
     -------
@@ -2099,6 +2072,23 @@ from polar_llama.tools import (
 from polar_llama.index import (
     NEIGHBOR_STRUCT_DTYPE,
     HnswIndex,
+)
+
+
+# ============================================================================
+# Deterministic Run Manifests (issue #85) — see docs/RUN_MANIFESTS.md
+# ============================================================================
+
+from polar_llama.manifest import (
+    MANIFEST_FORMAT_VERSION,
+    ManifestIntegrityError,
+    ManifestMismatchError,
+    RunManifest,
+    build_manifest,
+    load_manifest,
+    replay,
+    save_manifest,
+    with_manifest_id,
 )
 
 
