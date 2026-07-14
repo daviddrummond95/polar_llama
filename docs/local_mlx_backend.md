@@ -25,10 +25,21 @@ prompt string) because it is the prefix that a local server or in-process
 KV cache uses to decide what can be reused across rows. Keep it identical
 across a batch if you want caching to help.
 
-This document is scoped to **Apple Silicon** (M-series) Macs, which is the
-only platform MLX runs on. On any other machine, use a hosted provider or
-point `engine="server"` at a non-Mac local server (e.g. vLLM on Linux/CUDA)
-that speaks the OpenAI chat-completions API.
+This document is scoped to **MLX**, specifically -- both the `engine="server"`
+adapter pointed at `mlx_lm.server`/`vllm-mlx`, and the `engine="in_process"`
+MLX engine, both of which require **Apple Silicon** (M-series) Macs, the only
+platform MLX runs on.
+
+`engine="server"` itself is **not** Apple-only: it is a thin adapter over
+Polar Llama's existing async fan-out that works with *any* OpenAI-compatible
+local server, on any OS. On Linux, Windows, or a Mac where you'd rather not
+use MLX, see **[`docs/local_llamacpp_backend.md`](local_llamacpp_backend.md)**
+for the same `engine="server"` path against
+[llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` --
+prebuilt binaries for Linux/Windows/macOS, CPU or CUDA/ROCm/Vulkan/Metal GPU.
+`engine="in_process"`, by contrast, is genuinely Apple-Silicon-only (it's a
+direct binding to `mlx-lm`) -- there is no cross-platform equivalent of it in
+Polar Llama today.
 
 ## Two engines, two risk profiles
 
@@ -65,6 +76,12 @@ Apache-2.0) — a vLLM-style continuous-batching server targeting MLX:
 pip install vllm-mlx
 vllm-mlx serve mlx-community/gemma-4-e2b-it-4bit --port 8080
 ```
+
+Not on Apple Silicon, or want to run llama.cpp instead? See
+[`docs/local_llamacpp_backend.md`](local_llamacpp_backend.md) for the same
+`engine="server"` path against llama.cpp's `llama-server` (Linux, Windows,
+macOS; CPU or GPU) -- everything from here on in this section applies to it
+too.
 
 Either one exposes `POST http://localhost:8080/v1/chat/completions`.
 

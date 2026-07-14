@@ -326,6 +326,8 @@ Two engines are available:
 - **`engine="in_process"`** — batched generation directly via `mlx-lm` (`BatchGenerator` / `batch_generate`); nothing to run separately.
 - **`engine="server"`** (default) — routes the existing async fan-out to a local OpenAI-compatible endpoint (`mlx_lm.server`) via `OPENAI_BASE_URL`.
 
+**Not on Apple Silicon?** `engine="server"` isn't MLX-specific — it works with any OpenAI-compatible local server, including [llama.cpp](https://github.com/ggml-org/llama.cpp)'s `llama-server` on Linux, Windows, or macOS (CPU or CUDA/ROCm/Vulkan/Metal GPU). See [`docs/local_llamacpp_backend.md`](docs/local_llamacpp_backend.md) for install/run instructions, the sampling-parameter caveat (`max_tokens`/`temperature`/`top_p`/`stop` are set via `llama-server` CLI flags, not forwarded from Python — same limitation as `mlx_lm.server`), and a full feature matrix across `server`+`llama-server` / `server`+`mlx_lm.server` / `in_process`.
+
 **Collapsed prefill.** When rows share a long common prefix (a shared `system` prompt, or few-shot demos), set `POLAR_LLAMA_LOCAL_COLLAPSE=1` to compute that prefix once instead of re-prefilling it per row — a large speedup for prefill-bound workloads, at parity-verified output. Hybrid Gemma 3n / Gemma 4 models need the mlx-lm [#1384](https://github.com/ml-explore/mlx-lm/issues/1384) batched-RoPE fix, which Polar Llama applies automatically. See [`docs/local_mlx_backend.md`](docs/local_mlx_backend.md).
 
 #### Prompt Optimization (DSPy-style)

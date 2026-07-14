@@ -222,7 +222,137 @@ jobs:
           elif [ -d "tests" ]; then
             python -m mypy --ignore-missing-imports tests || true
           fi
-      
+
+  llamacpp_server_test:
+    # Blacksmith: no-artifact job, safe to run on managed runners (see PR).
+    # Issue #84, Tier 1: exercises `engine="server"` (polar_llama/local/server_backend.py,
+    # unchanged -- it already talks to any OpenAI-compatible local server) against a
+    # REAL llama.cpp `llama-server` process, so the non-Apple server path documented in
+    # docs/local_llamacpp_backend.md gets real coverage instead of only the mock server
+    # used by tests/test_local_server_backend.py. Both the llama.cpp build and the GGUF
+    # are pinned so this job's behavior doesn't drift out from under it.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      # Pinned llama.cpp release (github.com/ggml-org/llama.cpp/releases). Bump
+      # deliberately -- this pin is what keeps the job reproducible.
+      LLAMACPP_TAG: b10004
+      LLAMACPP_ASSET: llama-b10004-bin-ubuntu-x64.tar.gz
+      # Pinned tiny instruct GGUF (~135M params, ~100MB Q4_K_M) -- small enough to
+      # download and run per-CI-run with no GPU.
+      GGUF_REPO: bartowski/SmolLM2-135M-Instruct-GGUF
+      GGUF_FILE: SmolLM2-135M-Instruct-Q4_K_M.gguf
+      # Pin to an immutable commit revision (not the `main` branch ref) and the
+      # exact LFS sha256 so a truncated/altered download can never be cached
+      # and poison later runs with a confusing health-check timeout.
+      GGUF_REV: 09816acd5d99df7be770d85ea30822623dab342c
+      GGUF_SHA256: 2e8040ceae7815abe0dcb3540b9995eaa1fa0d2ca9e797d0a635ae4433c68c2d
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Set up Rust
+        run: rustup show
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      # Install dependencies and create virtualenv
+      - name: Install dependencies and create virtualenv
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install virtualenv
+          python -m virtualenv .venv
+          source .venv/bin/activate
+          pip install -r requirements.txt
+          pip install pytest python-dotenv
+          echo "VIRTUAL_ENV=$VIRTUAL_ENV" >> $GITHUB_ENV
+          echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
+
+      # Build and install the package with maturin
+      - name: Build and install package
+        run: |
+          source .venv/bin/activate
+          maturin develop --release
+
+      - name: Install llama-server runtime dependencies
+        # llama-server's CPU backend links libgomp (OpenMP); not guaranteed
+        # present on the base runner image.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgomp1
+
+      - name: Download pinned llama.cpp llama-server (${{ env.LLAMACPP_TAG }})
+        run: |
+          curl -fL --retry 5 --retry-delay 2 --retry-connrefused \
+            -o llamacpp.tar.gz \
+            "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMACPP_TAG}/${LLAMACPP_ASSET}"
+          mkdir -p llamacpp
+          tar xzf llamacpp.tar.gz -C llamacpp --strip-components=1
+          test -x llamacpp/llama-server
+
+      - name: Cache pinned GGUF model
+        id: cache-gguf
+        uses: actions/cache@v4
+        with:
+          path: models/${{ env.GGUF_FILE }}
+          # Key includes the sha256 so re-pinning the model invalidates old
+          # cache entries automatically.
+          key: gguf-${{ env.GGUF_FILE }}-${{ env.GGUF_SHA256 }}
+
+      - name: Download pinned GGUF model
+        if: steps.cache-gguf.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p models
+          # Download to a .part file from the pinned commit revision, then
+          # atomic-rename only after the sha256 verifies -- so actions/cache
+          # never persists a partial/corrupt file.
+          curl -fL --retry 5 --retry-delay 2 --retry-connrefused \
+            -o "models/${GGUF_FILE}.part" \
+            "https://huggingface.co/${GGUF_REPO}/resolve/${GGUF_REV}/${GGUF_FILE}"
+          echo "${GGUF_SHA256}  models/${GGUF_FILE}.part" | sha256sum -c -
+          mv "models/${GGUF_FILE}.part" "models/${GGUF_FILE}"
+
+      - name: Verify GGUF checksum (guards a poisoned cache)
+        run: |
+          echo "${GGUF_SHA256}  models/${GGUF_FILE}" | sha256sum -c -
+
+      - name: Start llama-server
+        run: |
+          LD_LIBRARY_PATH="$PWD/llamacpp" \
+            ./llamacpp/llama-server \
+              -m "models/${GGUF_FILE}" \
+              --port 8080 \
+              --temp 0 \
+              -n 48 \
+              -c 2048 \
+              --parallel 4 \
+              > llama-server.log 2>&1 &
+          disown
+
+      - name: Wait for llama-server /health
+        run: |
+          for i in $(seq 1 90); do
+            if curl -sf -o /dev/null http://127.0.0.1:8080/health; then
+              echo "llama-server is up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::llama-server did not become healthy within 90s"
+          cat llama-server.log || true
+          exit 1
+
+      - name: Run llama.cpp live server test
+        env:
+          POLAR_LLAMA_LLAMACPP_URL: http://127.0.0.1:8080
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/test_llamacpp_server_live.py -v --tb=short
+
+      - name: Show llama-server log
+        if: always()
+        run: cat llama-server.log || true
+
   linux:
     runs-on: ubuntu-latest
     strategy:
