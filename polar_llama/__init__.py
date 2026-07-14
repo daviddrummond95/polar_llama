@@ -1990,6 +1990,19 @@ from polar_llama.quality import (
 
 
 # ============================================================================
+# Human-in-the-loop Review Loop (issue #81) — see docs/HITL_WORKFLOW.md
+# ============================================================================
+
+from polar_llama.hitl import (
+    CorrectionResult,
+    corrections_to_trainset,
+    export_review_sample,
+    import_corrections,
+    retune_from_corrections,
+)
+
+
+# ============================================================================
 # Tool Use (MCP) — see docs/design/MCP_TOOL_INTEGRATION.md
 # ============================================================================
 
