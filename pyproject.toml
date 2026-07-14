@@ -61,6 +61,13 @@ dev = [
     "python-dotenv>=1.0.1",
 ]
 
+[tool.maturin]
+# Ship the packaged default price table (issue #76, polar_llama/pricing.py)
+# in both the sdist and the wheel -- maturin's default file discovery is
+# driven by git tracking / VCS rules, which is not guaranteed to pick up a
+# data directory reliably across all install paths, so it's listed explicitly.
+include = [{ path = "polar_llama/data/*.json", format = ["sdist", "wheel"] }]
+
 [tool.pytest.ini_options]
 markers = [
     "local_gpu: requires Apple GPU + mlx (skipped in CI)",

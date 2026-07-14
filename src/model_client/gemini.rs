@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
-use super::{ModelClient, ModelClientError, Message, Provider};
+use super::{ModelClient, ModelClientError, Message, Provider, Usage};
 use serde::Deserialize;
 
 /// Default Gemini model
@@ -136,6 +136,20 @@ impl ModelClient for GeminiClient {
     fn get_api_key(&self) -> String {
         self.api_key.clone().unwrap_or_else(|| {
             std::env::var("GEMINI_API_KEY").unwrap_or_default()
+        })
+    }
+
+    fn parse_usage(&self, response_text: &str) -> Option<Usage> {
+        // Off the raw JSON body, not the typed GeminiResponse struct -- see
+        // the trait doc on `parse_usage`. `promptTokenCount` already
+        // includes any cached subset, so no normalization is needed.
+        let v: Value = serde_json::from_str(response_text).ok()?;
+        let usage = v.get("usageMetadata")?;
+        Some(Usage {
+            input_tokens: usage.get("promptTokenCount").and_then(Value::as_i64),
+            output_tokens: usage.get("candidatesTokenCount").and_then(Value::as_i64),
+            cached_tokens: usage.get("cachedContentTokenCount").and_then(Value::as_i64),
+            latency_ms: None,
         })
     }
 }

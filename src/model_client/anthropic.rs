@@ -1,9 +1,10 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
-use super::{ModelClient, ModelClientError, Message, Provider};
+use super::{ModelClient, ModelClientError, Message, Provider, Usage};
 use super::streaming::{self, SseFrame, StreamEvent};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
+use std::time::Instant;
 use tokio::sync::mpsc::Sender;
 
 /// Default Anthropic model
@@ -201,27 +202,63 @@ impl ModelClient for AnthropicClient {
             .ok_or_else(|| ModelClientError::ParseError("No text or tool_use content found".to_string()))
     }
 
-    async fn send_request_structured(
+    async fn send_request_structured_with_usage(
         &self,
         client: &Client,
         messages: &[Message],
         schema: Option<&str>,
         model_name: Option<&str>,
-    ) -> Result<String, ModelClientError> {
+    ) -> Result<(String, Option<Usage>), ModelClientError> {
         let api_key = self.get_api_key();
         let body = self.format_request_body(messages, schema, model_name);
 
         let mut request = self.apply_auth(client.post(self.api_endpoint()), &api_key);
         request = self.apply_cache_beta_headers(request, messages);
 
+        let t0 = Instant::now();
         let response = request.json(&body).send().await?;
         let status = response.status();
         let text = response.text().await?;
+        let latency_ms = t0.elapsed().as_millis() as i64;
         if status.is_success() {
-            self.parse_response(&text)
+            let parsed = self.parse_response(&text)?;
+            let mut usage = self.parse_usage(&text).unwrap_or_default();
+            usage.latency_ms = Some(latency_ms);
+            Ok((parsed, Some(usage)))
         } else {
             Err(ModelClientError::Http(status.as_u16(), text))
         }
+    }
+
+    fn parse_usage(&self, response_text: &str) -> Option<Usage> {
+        // Read directly off the raw JSON body (not the typed AnthropicResponse
+        // struct) so a missing/unexpected usage shape can never break the
+        // main response parse path -- see the trait doc on `parse_usage`.
+        //
+        // Anthropic's own `input_tokens` EXCLUDES cache reads/writes, unlike
+        // every other provider here (where the prompt-token count already
+        // includes cached tokens). Normalize by folding both cache fields
+        // into `input_tokens` so `cached_tokens <= input_tokens` uniformly
+        // and the cost formula in Python stays provider-agnostic.
+        //
+        // Known limitation (documented, not fixed here): cache *writes* are
+        // billed at a ~1.25x premium over the base input rate, but this
+        // normalization folds `cache_creation_input_tokens` into
+        // `input_tokens` at the base rate -- `cost_usd` slightly undercounts
+        // when a request creates new cache entries.
+        let v: Value = serde_json::from_str(response_text).ok()?;
+        let usage = v.get("usage")?;
+        let base_input = usage.get("input_tokens").and_then(Value::as_i64).unwrap_or(0);
+        let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_i64).unwrap_or(0);
+        let cache_creation = usage.get("cache_creation_input_tokens").and_then(Value::as_i64).unwrap_or(0);
+        let output_tokens = usage.get("output_tokens").and_then(Value::as_i64);
+
+        Some(Usage {
+            input_tokens: Some(base_input + cache_read + cache_creation),
+            output_tokens,
+            cached_tokens: Some(cache_read),
+            latency_ms: None,
+        })
     }
 
     async fn send_request_streaming(

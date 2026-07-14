@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
-use super::{ModelClient, ModelClientError, Message, Provider, EmbeddingClient};
+use super::{ModelClient, ModelClientError, Message, Provider, EmbeddingClient, Usage};
 use super::streaming::{self, StreamEvent};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
@@ -121,6 +121,23 @@ impl ModelClient for OpenAIClient {
             .next()
             .and_then(|choice| choice.message.content)
             .ok_or_else(|| ModelClientError::ParseError("No response content".to_string()))
+    }
+
+    fn parse_usage(&self, response_text: &str) -> Option<Usage> {
+        // Off the raw JSON body, not the typed OpenAICompletion struct -- see
+        // the trait doc on `parse_usage`. `prompt_tokens` already includes
+        // the cached subset, so no normalization is needed (unlike Anthropic).
+        let v: Value = serde_json::from_str(response_text).ok()?;
+        let usage = v.get("usage")?;
+        Some(Usage {
+            input_tokens: usage.get("prompt_tokens").and_then(Value::as_i64),
+            output_tokens: usage.get("completion_tokens").and_then(Value::as_i64),
+            cached_tokens: usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(Value::as_i64),
+            latency_ms: None,
+        })
     }
 
     async fn send_request_streaming(

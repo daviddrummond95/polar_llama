@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-14
+
+### Added
+- **Per-row usage & cost accounting** (`inference_async(..., usage=True)` / `inference_messages`, issue #76): returns a `Struct{response, usage: Struct{input_tokens, output_tokens, cached_tokens, latency_ms, cost_usd}}` column. `usage=False` (default) is byte-identical to before. Provider usage metadata is parsed for OpenAI, Groq, Anthropic, Gemini, and Bedrock (Anthropic's split cache tokens are normalized so `cached_tokens ⊆ input_tokens`), latency is measured around the HTTP call in Rust, and `cost_usd` is computed from a packaged, overridable price table (`polar_llama/pricing.py` + `polar_llama/data/`; pass `price_table=` or `pricing.register_model(...)`). Unknown models yield `cost_usd = null` with a one-time warning rather than an error. The MLX in-process local engine reports `input_tokens`/`output_tokens`/`latency_ms` with `cost_usd = 0.0`.
+
+### Notes
+- Caveats (documented): Anthropic cache-*write* tokens are folded into `input_tokens` at the base input rate, so `cost_usd` slightly undercounts when prompt-cache writes occur. `usage=True` combined with `checkpoint=` currently raises `ValueError` (envelope-wrapped error rows would be misclassified by the checkpoint store); supporting both together is deferred (see the issue #76 design notes).
+
 ## [0.6.1] - 2026-07-14
 
 ### Added

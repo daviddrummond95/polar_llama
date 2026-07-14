@@ -247,6 +247,25 @@ out = df.with_columns(
 
 The checkpoint key hashes the row input **and** the run config (provider, model, prompt, response schema, endpoint), so changing any of them invalidates old entries automatically — you never get a stale result from a different configuration. Failed rows are stored as failed and retried on resume by default (`Checkpoint(path, retry_failed=False)` to return the stored error instead). Works with structured outputs and tool-use passes. See `docs/design/CHECKPOINTING.md`.
 
+#### Per-Row Usage & Cost
+
+Pass `usage=True` to get token counts, latency, and estimated cost per row as a struct column — useful for invoicing against LLM spend or surfacing usage to users.
+
+```python
+out = df.with_columns(
+    r=inference_async(pl.col("prompt"), provider=Provider.OPENAI,
+                      model="gpt-4o-mini", usage=True)
+)
+# r is Struct{response, usage: Struct{input_tokens, output_tokens,
+#                                     cached_tokens, latency_ms, cost_usd}}
+totals = out.select(
+    cost=pl.col("r").struct.field("usage").struct.field("cost_usd").sum(),
+    in_tok=pl.col("r").struct.field("usage").struct.field("input_tokens").sum(),
+)
+```
+
+`cost_usd` is computed from a packaged, overridable price table (`polar_llama/pricing.py`); pass `price_table=` (a dict or path) or call `register_model_price(...)` to add/override models. Unknown models yield `cost_usd = null` with a one-time warning. Usage is captured for OpenAI, Groq, Anthropic, Gemini, and Bedrock; the MLX local engine reports tokens + latency with `cost_usd = 0.0`. `usage=False` (the default) is unchanged.
+
 #### Local Inference (Apple Silicon / MLX)
 
 Run inference **on-device** on Apple Silicon instead of a provider API — no keys, no network — via [mlx-lm](https://github.com/ml-explore/mlx-lm). Install the extra (Apple Silicon, Python ≥ 3.10):

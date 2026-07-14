@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from typing import (
     Callable,
     Dict,
@@ -143,6 +144,40 @@ class FakeEngine:
             except Exception as exc:  # noqa: BLE001 -- isolate per-row failure
                 text = error_response("local_generation_error", str(exc))
             results.append(text)
+        return results
+
+    def generate_with_usage(
+        self,
+        prompts: List[str],
+        *,
+        max_tokens: int = 512,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        stop: Optional[List[str]] = None,
+    ) -> List[Tuple[str, Dict[str, Optional[int]]]]:
+        """Deterministic token/latency accounting for `usage=True` (issue #76).
+
+        ``input_tokens``/``output_tokens`` are whitespace-token counts of the
+        prompt/completion (a cheap, dependency-free stand-in -- there is no
+        real tokenizer to consult here); ``latency_ms`` is measured with
+        ``time.perf_counter()`` per prompt (asserted ``>= 0`` in tests, not a
+        fixed value). ``cost_usd`` is always 0.0 for the in-process engine
+        (computed Python-side in ``polar_llama.local.expr``, not here).
+        """
+        results: List[Tuple[str, Dict[str, Optional[int]]]] = []
+        for prompt in prompts:
+            t0 = time.perf_counter()
+            try:
+                text = self._one(prompt, max_tokens=max_tokens, stop=stop)
+            except Exception as exc:  # noqa: BLE001 -- isolate per-row failure
+                text = error_response("local_generation_error", str(exc))
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            usage = {
+                "input_tokens": len(prompt.split()),
+                "output_tokens": len(text.split()),
+                "latency_ms": latency_ms,
+            }
+            results.append((text, usage))
         return results
 
     def _one(
@@ -510,6 +545,66 @@ class MlxBatchEngine:
         texts = getattr(outputs, "texts", outputs)
         return [str(t) for t in texts]
 
+    def generate_with_usage(
+        self,
+        prompts: List[str],
+        *,
+        max_tokens: int = 512,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        stop: Optional[List[str]] = None,
+    ) -> List[Tuple[str, Dict[str, Optional[int]]]]:
+        """Best-effort token/latency accounting for `usage=True` (issue #76).
+
+        Wraps the existing :meth:`generate` (no separate code path to keep
+        in sync): ``input_tokens`` is ``len(self._encode(prompt))`` (the same
+        token-id encoding already used to build ``prompt_tokens`` for
+        ``batch_generate``); ``output_tokens`` is
+        ``len(tokenizer.encode(text))``. ``latency_ms`` is the wall-clock of
+        the WHOLE batch call, stamped identically on every row of the batch
+        (there is no per-row completion callback in the high-level
+        ``batch_generate`` path this wraps -- documented as batch latency,
+        not per-row TTFT). Any per-row encode/decode failure degrades that
+        row's token counts to ``None`` rather than failing the batch.
+        """
+        if not prompts:
+            return []
+
+        t0 = time.perf_counter()
+        texts = self.generate(
+            prompts,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop,
+        )
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+
+        tokenizer = self._tokenizer
+        results: List[Tuple[str, Dict[str, Optional[int]]]] = []
+        for prompt, text in zip(prompts, texts):
+            try:
+                input_tokens: Optional[int] = len(self._encode(prompt))
+            except Exception:  # noqa: BLE001 -- best-effort accounting only
+                input_tokens = None
+            try:
+                output_tokens: Optional[int] = (
+                    len(tokenizer.encode(text)) if tokenizer is not None else None
+                )
+            except Exception:  # noqa: BLE001 -- best-effort accounting only
+                output_tokens = None
+            results.append(
+                (
+                    text,
+                    {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "latency_ms": latency_ms,
+                    },
+                )
+            )
+        return results
+
     # -- helpers ------------------------------------------------------------
     def _encode(self, prompt: str) -> Sequence[int]:
         tokenizer = self._tokenizer
@@ -660,4 +755,63 @@ def generate_chunked(
                 stop=stop,
             )
         )
+    return results
+
+
+def generate_chunked_with_usage(
+    engine: LocalEngine,
+    prompts: Sequence[str],
+    *,
+    max_tokens: int = 512,
+    temperature: float = 0.0,
+    top_p: float = 1.0,
+    stop: Optional[List[str]] = None,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+) -> List[Tuple[str, Dict[str, Optional[int]]]]:
+    """Run ``engine.generate_with_usage`` over ``prompts`` in row-aligned chunks.
+
+    Issue #76: mirrors :func:`generate_chunked`, but also returns per-row
+    token/latency accounting. Falls back to ``engine.generate`` + an
+    all-null-tokens usage dict (``latency_ms`` measured around the call) when
+    the engine doesn't implement ``generate_with_usage`` -- so ``usage=True``
+    never hard-fails for a third-party/older :class:`LocalEngine` that
+    predates this method; it just reports null tokens.
+    """
+    prompt_list = list(prompts)
+    generate_with_usage_fn = getattr(engine, "generate_with_usage", None)
+
+    def _run_chunk(chunk: List[str]) -> List[Tuple[str, Dict[str, Optional[int]]]]:
+        if generate_with_usage_fn is not None:
+            return list(
+                generate_with_usage_fn(
+                    chunk,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop=stop,
+                )
+            )
+        t0 = time.perf_counter()
+        texts = engine.generate(
+            chunk,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop,
+        )
+        latency_ms = int((time.perf_counter() - t0) * 1000)
+        return [
+            (
+                text,
+                {"input_tokens": None, "output_tokens": None, "latency_ms": latency_ms},
+            )
+            for text in texts
+        ]
+
+    if len(prompt_list) <= chunk_size:
+        return _run_chunk(prompt_list)
+
+    results: List[Tuple[str, Dict[str, Optional[int]]]] = []
+    for chunk in iter_chunks(prompt_list, chunk_size):
+        results.extend(_run_chunk(chunk))
     return results

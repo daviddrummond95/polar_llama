@@ -1,9 +1,10 @@
 use serde_json::{json, Value};
 use async_trait::async_trait;
-use super::{ModelClient, ModelClientError, Message, Provider};
+use super::{ModelClient, ModelClientError, Message, Provider, Usage};
 use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::time::Instant;
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::{
     types::{
@@ -152,7 +153,23 @@ impl ModelClient for BedrockClient {
         Ok(response_text.to_string())
     }
 
-    async fn send_request(&self, _client: &Client, messages: &[Message]) -> Result<String, ModelClientError> {
+    /// The canonical Bedrock send: the AWS SDK `converse()` call, with usage
+    /// captured directly from the SDK response (not via `parse_usage`, which
+    /// is unused here -- `parse_response` above is a passthrough since
+    /// Bedrock never goes through the generic HTTP JSON-body path). Both
+    /// `send_request` and `send_request_structured` (trait defaults) route
+    /// through this override, so it is the ONLY Bedrock send path -- no risk
+    /// of the two desyncing. Bedrock Converse does not take a JSON schema in
+    /// this integration; `schema`/`model_name` are accepted for trait
+    /// compliance but unused, and responses are validated post-hoc by the
+    /// caller exactly as before.
+    async fn send_request_structured_with_usage(
+        &self,
+        _client: &Client,
+        messages: &[Message],
+        _schema: Option<&str>,
+        _model_name: Option<&str>,
+    ) -> Result<(String, Option<Usage>), ModelClientError> {
         // We don't use the reqwest client for Bedrock; we use the AWS SDK
         let bedrock_client = bedrock_client_for_region(&self.region).await;
 
@@ -167,37 +184,35 @@ impl ModelClient for BedrockClient {
             converse_request = converse_request.set_system(Some(system_blocks));
         }
 
+        let t0 = Instant::now();
         let response = converse_request
             .send()
             .await
             .map_err(|e| ModelClientError::ParseError(format!("Bedrock API error: {e}")))?;
+        let latency_ms = t0.elapsed().as_millis() as i64;
+
+        let mut usage = Usage {
+            latency_ms: Some(latency_ms),
+            ..Default::default()
+        };
+        if let Some(sdk_usage) = response.usage.as_ref() {
+            usage.input_tokens = Some(sdk_usage.input_tokens as i64);
+            usage.output_tokens = Some(sdk_usage.output_tokens as i64);
+            usage.cached_tokens = sdk_usage.cache_read_input_tokens.map(|v| v as i64);
+        }
 
         // Extract the response text
         if let Some(output) = response.output {
             if let Ok(message) = output.as_message() {
                 for content in &message.content {
                     if let Ok(text) = content.as_text() {
-                        return Ok(text.clone());
+                        return Ok((text.clone(), Some(usage)));
                     }
                 }
             }
         }
 
         Err(ModelClientError::ParseError("No text content found in Bedrock response".to_string()))
-    }
-
-    async fn send_request_structured(
-        &self,
-        client: &Client,
-        messages: &[Message],
-        _schema: Option<&str>,
-        _model_name: Option<&str>
-    ) -> Result<String, ModelClientError> {
-        // Bedrock Converse does not take a JSON schema in this integration;
-        // responses are validated post-hoc by the caller. Delegating here
-        // (instead of inheriting the HTTP default) keeps the structured path
-        // on the AWS SDK.
-        self.send_request(client, messages).await
     }
 
     fn get_api_key(&self) -> String {

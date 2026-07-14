@@ -53,6 +53,14 @@ pub struct InferenceKwargs {
     /// System prompt to prepend to all messages (enables caching for inference_async)
     #[serde(default)]
     system_prompt: Option<String>,
+
+    /// Enable per-row usage/cost accounting (issue #76). When true, the
+    /// output string for each row is a JSON envelope
+    /// `{"response": ..., "usage": {...}}` instead of the bare response,
+    /// decoded into a Struct on the Python side. Default: false (byte-
+    /// identical to the pre-#76 output).
+    #[serde(default)]
+    usage: Option<bool>,
 }
 
 fn parse_provider(provider_str: &str) -> Option<Provider> {
@@ -128,6 +136,9 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
 
     // Check if caching is enabled with a system prompt
     let cache_enabled = kwargs.cache.unwrap_or(false);
+    // Issue #76: per-row usage/cost accounting. `Option<bool>` is Copy, so
+    // reading it here doesn't move anything else out of `kwargs`.
+    let with_usage = kwargs.usage.unwrap_or(false);
 
     if let Some(system_prompt) = kwargs.system_prompt.as_ref().filter(|_| cache_enabled) {
         // Use caching path: convert text prompts to message arrays with shared system prompt
@@ -185,6 +196,7 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
             &cache_config,
             schema_owned.as_deref(),
             model_name_owned.as_deref(),
+            with_usage,
         );
 
         // Map results back to original positions
@@ -213,17 +225,14 @@ fn inference_async(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResult<S
     let model_name = kwargs.response_model_name;
 
     let api_results = run_async(async move {
-        if schema.is_some() {
-            fetch_data_with_provider_and_schema(
-                &messages,
-                provider,
-                &model,
-                schema.as_deref(),
-                model_name.as_deref(),
-            ).await
-        } else {
-            fetch_data_with_provider(&messages, provider, &model).await
-        }
+        crate::utils::fetch_data_with_provider_opts(
+            &messages,
+            provider,
+            &model,
+            schema.as_deref(),
+            model_name.as_deref(),
+            with_usage,
+        ).await
     });
 
     // Map results back to original positions
@@ -328,6 +337,8 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
 
     // Check if caching is enabled
     let cache_enabled = kwargs.cache.unwrap_or(false);
+    // Issue #76: per-row usage/cost accounting.
+    let with_usage = kwargs.usage.unwrap_or(false);
 
     // Get results based on caching, provider and model
     let api_results = if cache_enabled {
@@ -358,27 +369,22 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
             &cache_config,
             schema.as_deref(),
             model_name.as_deref(),
+            with_usage,
         )
-    } else if schema.is_some() {
-        // Use structured output with validation (non-cached)
+    } else {
+        // Non-cached path (structured or plain): unified through the
+        // `_opts` fetcher, which reproduces the pre-#76 split exactly for
+        // `with_usage=false` (`errors_as_json = schema.is_some()`).
         let schema_owned = schema.clone();
         let model_name_owned = model_name.clone();
         let arrays_owned = message_arrays.clone();
         let model_owned = model.clone();
 
         run_async(async move {
-            crate::utils::fetch_data_message_arrays_with_provider_and_schema(
+            crate::utils::fetch_data_message_arrays_with_provider_opts(
                 &arrays_owned, provider, &model_owned,
-                schema_owned.as_deref(), model_name_owned.as_deref()
+                schema_owned.as_deref(), model_name_owned.as_deref(), with_usage,
             ).await
-        })
-    } else {
-        // Use regular inference without structured output (non-cached)
-        let arrays_owned = message_arrays.clone();
-        let model_owned = model.clone();
-
-        run_async(async move {
-            crate::utils::fetch_data_message_arrays_with_provider(&arrays_owned, provider, &model_owned).await
         })
     };
 
@@ -394,6 +400,7 @@ fn inference_messages(inputs: &[Series], kwargs: InferenceKwargs) -> PolarsResul
 }
 
 /// Process message arrays with cache group optimization
+#[allow(clippy::too_many_arguments)]
 fn process_with_cache_groups(
     message_arrays: Vec<Vec<Message>>,
     cache_groups: Vec<cache::CacheGroup>,
@@ -402,6 +409,7 @@ fn process_with_cache_groups(
     config: &CacheConfig,
     response_schema: Option<&str>,
     response_model_name: Option<&str>,
+    with_usage: bool,
 ) -> Vec<Option<String>> {
     let total_rows = message_arrays.len();
     let mut all_results: Vec<(usize, Option<String>)> = Vec::with_capacity(total_rows);
@@ -433,7 +441,7 @@ fn process_with_cache_groups(
             run_async(async move {
                 crate::utils::fetch_with_cache_warming(
                     &msgs, provider, &m,
-                    schema.as_deref(), model_name.as_deref()
+                    schema.as_deref(), model_name.as_deref(), with_usage,
                 ).await
             })
         } else {
@@ -444,14 +452,10 @@ fn process_with_cache_groups(
             let model_name = response_model_name.map(|s| s.to_string());
 
             run_async(async move {
-                if schema.is_some() {
-                    crate::utils::fetch_data_message_arrays_with_provider_and_schema(
-                        &msgs, provider, &m,
-                        schema.as_deref(), model_name.as_deref()
-                    ).await
-                } else {
-                    crate::utils::fetch_data_message_arrays_with_provider(&msgs, provider, &m).await
-                }
+                crate::utils::fetch_data_message_arrays_with_provider_opts(
+                    &msgs, provider, &m,
+                    schema.as_deref(), model_name.as_deref(), with_usage,
+                ).await
             })
         };
 
